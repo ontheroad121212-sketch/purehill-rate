@@ -94,46 +94,61 @@ def apply_color(val):
     return f'background-color: #{color_hash}; color: black; font-weight: bold;'
 
 def load_custom_excel(file):
-    # 엔진 자동 선택 (xlrd, openpyxl 모두 대응)
+    # 엔진 자동 선택 및 모든 시트 읽기 시도
     df_raw = pd.read_excel(file, header=None)
     
-    # 3행(index 2)에서 날짜 데이터 추출
+    # 3행(index 2)에서 날짜 데이터 추출 (공백 제거)
     dates_raw = df_raw.iloc[2, 2:].values
-    # 7, 8, 11, 12, 13행 (index 6, 7, 10, 11, 12)
-    target_rows = [6, 7, 10, 11, 12]
+    
+    # 우리가 찾는 객실 키워드 리스트
+    target_keywords = list(ROOM_MAPPING.keys())
     
     all_data = []
-    for row_idx in target_rows:
-        if row_idx >= len(df_raw): continue
-        room_display_name = df_raw.iloc[row_idx, 0]
-        room_id = ROOM_MAPPING.get(room_display_name, "FDB")
-        total_inv = ROOM_CONFIG.get(room_id, 30)
-        avails = df_raw.iloc[row_idx, 2:].values
+    
+    # 엑셀의 모든 행을 훑으며 객실 이름이 있는지 확인 (더 안전한 방식)
+    for row_idx in range(len(df_raw)):
+        cell_value = str(df_raw.iloc[row_idx, 0]).strip()
         
-        for date, avail in zip(dates_raw, avails):
-            if pd.isna(date) or pd.isna(avail): continue
+        # 엑셀 칸에 우리가 설정한 객실 이름이 포함되어 있는지 체크
+        matched_room = None
+        for k in target_keywords:
+            if k in cell_value:
+                matched_room = k
+                break
+        
+        if matched_room:
+            room_id = ROOM_MAPPING[matched_room]
+            total_inv = ROOM_CONFIG.get(room_id, 30)
+            avails = df_raw.iloc[row_idx, 2:].values
             
-            try:
-                # 날짜 변환 (에러 시 건너뜀)
-                if isinstance(date, (int, float)):
-                    d_obj = pd.to_datetime('1899-12-30') + pd.to_timedelta(date, 'D')
-                else:
-                    d_obj = pd.to_datetime(date, errors='coerce')
+            for date, avail in zip(dates_raw, avails):
+                if pd.isna(date) or pd.isna(avail): continue
                 
-                if pd.isna(d_obj): continue
-                
-                all_data.append({
-                    "Date": d_obj.date(),
-                    "RoomID": room_id,
-                    "RoomName": room_display_name,
-                    "Available": avail,
-                    "Total": total_inv
-                })
-            except:
-                continue
-                
-    return pd.DataFrame(all_data)
-
+                try:
+                    # 날짜 변환 로직
+                    if isinstance(date, (int, float)):
+                        d_obj = pd.to_datetime('1899-12-30') + pd.to_timedelta(date, 'D')
+                    else:
+                        d_obj = pd.to_datetime(str(date).strip(), errors='coerce')
+                    
+                    if pd.isna(d_obj): continue
+                    
+                    all_data.append({
+                        "Date": d_obj.date(),
+                        "RoomID": room_id,
+                        "RoomName": matched_room,
+                        "Available": pd.to_numeric(avail, errors='coerce'),
+                        "Total": total_inv
+                    })
+                except:
+                    continue
+                    
+    result_df = pd.DataFrame(all_data)
+    # 데이터가 비었는지 확인용 로그 (스트림릿 로그에서 확인 가능)
+    if result_df.empty:
+        st.error(f"매칭된 객실이 없습니다. 엑셀 A열 이름을 확인해주세요. (찾는 이름: {target_keywords})")
+        
+    return result_df
 # --- 4. Streamlit UI ---
 st.set_page_config(layout="wide")
 st.title("🏨 호텔 요금 관리 및 히스토리 대시보드")
