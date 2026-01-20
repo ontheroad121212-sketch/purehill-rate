@@ -38,7 +38,7 @@ ROOM_MAPPING = {
 
 # 객실별 전체 재고량
 ROOM_CONFIG = {
-    "FDB": 32, "FDE": 20, "HDP": 10, "HDT": 15, "HDF": 12
+    "FDB": 32, "FDE": 8, "HDP": 19, "HDT": 34, "HDF": 18
 }
 
 # 특수 기간 설정
