@@ -128,8 +128,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     for rid in rooms_to_show:
         label = rid
         if mode == "판매가":
-            cfg = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"name": rid})
-            label = f"<b>{rid}</b><br><small style='color:blue;'>{cfg.get('name', rid)}</small>"
+            cfg_p = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"name": rid})
+            label = f"<b>{rid}</b><br><small style='color:blue;'>{cfg_p.get('name', rid)}</small>"
         
         border_thick = "border-bottom:3.4px solid #000;" if rid in ["HDF", "PPV"] else ""
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'>{label}</td>"
@@ -170,9 +170,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     content = f"▲ {bar}"
                 else: content = bar
             elif mode == "판매가":
-                conf = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
-                after_disc = base_price * (1 - (conf.get('discount_rate', 0) / 100))
-                final_p = int((math.floor(after_disc / 1000) * 1000) + conf.get('add_price', 0))
+                conf_s = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
+                after_disc = base_price * (1 - (conf_s.get('discount_rate', 0) / 100))
+                final_p = int((math.floor(after_disc / 1000) * 1000) + conf_s.get('add_price', 0))
                 content = f"<b>{final_p:,}</b>"
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
@@ -183,7 +183,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table></div>"
     return html
 
-# --- [파서, DB 유틸 생략 없이 포함] ---
+# --- 5. 파서 및 DB 로직 ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
     try:
@@ -195,7 +195,10 @@ def robust_date_parser(d_val):
     return None
 
 def save_channel_configs():
-    db.collection("settings").document("channels").set({"channel_list": st.session_state.channel_list, "promotions": st.session_state.promotions})
+    db.collection("settings").document("channels").set({
+        "channel_list": st.session_state.channel_list, 
+        "promotions": st.session_state.promotions
+    })
 
 def load_channel_configs():
     doc = db.collection("settings").document("channels").get()
@@ -203,19 +206,24 @@ def load_channel_configs():
         d = doc.to_dict()
         st.session_state.channel_list = d.get("channel_list", [])
         st.session_state.promotions = d.get("promotions", {})
+    else:
+        st.session_state.channel_list = []
+        st.session_state.promotions = {}
 
-# --- 5. UI 및 메인 로직 ---
+# --- 6. 앱 초기화 및 사이드바 ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
-if 'channel_list' not in st.session_state: load_channel_configs()
+# 🔴 AttributeError 방지: 세션 초기화 및 로드 순서 강제 고정
+if 'channel_list' not in st.session_state:
+    load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 
 with st.sidebar:
-    st.header("📅 수정 내역 공유")
-    work_day = st.date_input("조회할 작업 날짜", value=date.today())
-    if st.button("📂 팀원 데이터 로드"):
+    st.header("📅 수정 내역 공유/조회")
+    work_day = st.date_input("작업 날짜 선택", value=date.today())
+    if st.button("📂 팀 데이터 로드"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
         for doc in docs:
@@ -229,7 +237,7 @@ with st.sidebar:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', list(st.session_state.promotions.keys()))
             found = True
-        if found: st.success("팀 공유 데이터 로드 완료")
+        if found: st.success("데이터 로드 성공")
         else: st.warning("내역 없음")
 
     st.divider()
@@ -258,10 +266,10 @@ with st.sidebar:
                 c1, c2 = st.columns(2)
                 cfg['discount_rate'] = c1.number_input("할인(%)", value=float(cfg['discount_rate']), key=f"d_{ch}_{rid}")
                 cfg['add_price'] = c2.number_input("추가금", value=int(cfg['add_price']), step=1000, key=f"a_{ch}_{rid}")
-            if st.button(f"💾 {ch} 저장", key=f"s_{ch}"): save_channel_configs()
+            if st.button(f"💾 {ch} 저장", key=f"s_{ch}"): save_channel_configs(); st.success("저장됨")
 
     st.divider()
-    files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
+    files = st.file_uploader("리포트 업로드", accept_multiple_files=True)
     if st.button("🚀 오늘 내역 팀 공유 저장"):
         if not st.session_state.today_df.empty:
             t_df = st.session_state.today_df.copy()
@@ -271,36 +279,34 @@ with st.sidebar:
                 p_df = st.session_state.prev_df.copy()
                 p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat())
                 p_df_dict = p_df.to_dict(orient='records')
-            db.collection("daily_snapshots").add({"work_date": date.today().strftime("%Y-%m-%d"), "save_time": datetime.now().isoformat(), "data": t_df.to_dict(orient='records'), "prev_data": p_df_dict, "saved_promotions": st.session_state.promotions, "saved_channel_list": st.session_state.channel_list})
+            db.collection("daily_snapshots").add({
+                "work_date": date.today().strftime("%Y-%m-%d"),
+                "save_time": datetime.now().isoformat(),
+                "data": t_df.to_dict(orient='records'),
+                "prev_data": p_df_dict,
+                "saved_promotions": st.session_state.promotions,
+                "saved_channel_list": st.session_state.channel_list
+            })
             st.success("팀 공유 서버 저장 완료!")
 
-# --- 6. 파일 로직 (사용자 지정 행 고정 매칭) ---
+# --- 7. 파일 로직 (알려주신 고정 행 번호 적용) ---
 if files:
     all_extracted = []
-    # 사용자 지정 매칭 사전: {행 인덱스: 객실ID} (엑셀 1행=인덱스 0 기준)
-    FIXED_POS = {4: "GDB", 5: "GDF", 8: "FPT", 9: "FFD", 13: "PPV"}
-    DYN_POS = {5: "FDB", 6: "FDE", 9: "HDP", 10: "HDT", 11: "HDF"}
+    # 사용자 지정 행: GDB(5), GDF(6), FPT(9), FFD(10), PPV(14) / 유동객실(6,7,10,11,12)
+    # 인덱스 변환: 5행 -> 4, 6행 -> 5, 9행 -> 8, 10행 -> 9, 14행 -> 13
+    FIXED_MAP = {4: "GDB", 5: "GDF", 8: "FPT", 9: "FFD", 13: "PPV"}
+    DYN_MAP = {5: "FDB", 6: "FDE", 9: "HDP", 10: "HDT", 11: "HDF"}
 
     for f in files:
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
         
-        # 1. 고정 객실 5종 긁기 (알려주신 5, 6, 9, 10, 14행 기준)
-        # 파이썬 인덱스는 0부터 시작하므로 -1 적용
-        for row_idx, rid in FIXED_POS.items():
-            if row_idx < len(df_raw):
-                tot = pd.to_numeric(df_raw.iloc[row_idx, 1], errors='coerce')
-                for d_val, av in zip(dates_raw, df_raw.iloc[row_idx, 2:].values):
-                    d_obj = robust_date_parser(d_val)
-                    if d_obj is None or pd.isna(av): continue
-                    all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot, "Tag": date_tag})
-        
-        # 2. 유동 객실 5종 긁기 (기존 6, 7, 10, 11, 12행 기준)
-        for row_idx, rid in DYN_POS.items():
-            if row_idx < len(df_raw):
-                tot = pd.to_numeric(df_raw.iloc[row_idx, 1], errors='coerce')
-                for d_val, av in zip(dates_raw, df_raw.iloc[row_idx, 2:].values):
+        # 고정 및 유동 객실 데이터 취합
+        for r_idx, rid in {**FIXED_MAP, **DYN_MAP}.items():
+            if r_idx < len(df_raw):
+                tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
+                for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                     d_obj = robust_date_parser(d_val)
                     if d_obj is None or pd.isna(av): continue
                     all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot, "Tag": date_tag})
@@ -312,11 +318,11 @@ if files:
             st.session_state.today_df, st.session_state.prev_df = full_df[full_df['Tag']==tags[-1]].copy(), full_df[full_df['Tag']==tags[-2]].copy()
         else: st.session_state.today_df = full_df.copy()
 
-# --- 7. 메인 화면 출력 ---
+# --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급 채도 적용)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (지정 행 매칭 완료)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (고정 행 매칭 완료)", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가", mode="판매가"), unsafe_allow_html=True)
