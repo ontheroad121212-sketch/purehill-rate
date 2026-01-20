@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -16,6 +16,9 @@ db = firestore.client()
 
 if 'all_data_df' not in st.session_state:
     st.session_state.all_data_df = pd.DataFrame()
+
+# 요일 표시용 한글 매핑
+WEEKDAYS_KR = ['월', '화', '수', '목', '금', '토', '일']
 
 # --- 2. 설정 데이터 ---
 PRICE_TABLE = {
@@ -83,86 +86,133 @@ def load_custom_excel(file):
             except: continue
     return pd.DataFrame(all_data)
 
-# ⭐ HTML/CSS 기반의 커스텀 병합 테이블 생성 함수
-def render_custom_table(m_df):
+# 어제 데이터 가져오기 (Firebase)
+def get_yesterday_data():
+    docs = db.collection("daily_snapshots").order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
+    for doc in docs:
+        return pd.DataFrame(doc.to_dict()['data'])
+    return pd.DataFrame()
+
+# --- 4. 요일/변화량/커스텀 수식이 들어간 HTML 테이블 ---
+def render_rms_table(current_df, prev_df, custom_fee):
     room_ids = ["FDB", "FDE", "HDP", "HDT", "HDF"]
-    dates = sorted(m_df['Date'].unique())
+    dates = sorted(current_df['Date'].unique())
     
     html = """
     <style>
-        .hotel-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 13px; }
-        .hotel-table th, .hotel-table td { border: 1px solid #ddd; text-align: center; padding: 4px; }
-        .hotel-table th { background-color: #f4f4f4; position: sticky; top: 0; }
-        .room-id-cell { font-weight: bold; background-color: #ffffff; width: 80px; border-right: 2px solid #333 !important; }
-        .occ-row { font-size: 10px; color: #888; height: 15px; }
-        .bar-row { font-weight: bold; font-size: 14px; }
-        .price-row { border-bottom: 2px solid #000 !important; } /* 객실 사이 굵은 줄 */
+        .rms-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 12px; }
+        .rms-table th, .rms-table td { border: 1px solid #ddd; text-align: center; padding: 3px; }
+        .rms-table th { background-color: #f2f2f2; }
+        .room-col { font-weight: bold; width: 70px; border-right: 2px solid #333 !important; background: #fff; }
+        .sun { color: red; } .sat { color: blue; }
+        .pickup-plus { background-color: #FFEBEE; color: #D32F2F; font-weight: bold; }
+        .pickup-minus { background-color: #E3F2FD; color: #1976D2; }
+        .last-row { border-bottom: 3px solid #000 !important; }
+        .custom-price { font-weight: bold; color: #2E7D32; }
     </style>
-    <table class='hotel-table'>
+    <table class='rms-table'>
         <thead>
             <tr>
-                <th>Room ID</th>
-                <th>구분</th>
+                <th rowspan='2'>Room ID</th>
+                <th rowspan='2'>구분</th>
     """
+    # 날짜 헤더
     for d in dates:
         html += f"<th>{d.strftime('%m-%d')}</th>"
+    html += "</tr><tr>"
+    
+    # 요일 헤더
+    for d in dates:
+        wd = WEEKDAYS_KR[d.weekday()]
+        cls = "sun" if wd == '일' else ("sat" if wd == '토' else "")
+        html += f"<th class='{cls}'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
     for rid in room_ids:
-        # 각 RoomID당 3행 (점유율, BAR, 요금)
-        for i, category in enumerate(["점유율", "BAR", "요금"]):
-            row_class = "occ-row" if i==0 else ("bar-row" if i==1 else "price-row")
-            html += f"<tr class='{row_class}'>"
-            
-            # 첫 번째 행에서만 RoomID를 병합(rowspan=3)해서 출력
-            if i == 0:
-                html += f"<td rowspan='3' class='room-id-cell'>{rid}</td>"
-            
-            html += f"<td style='background-color:#fafafa;'>{category}</td>"
+        for i, category in enumerate(["점유율", "Pick-up", "추천BAR", "판매가(커스텀)"]):
+            is_last = (i == 3)
+            html += f"<tr class='{'last-row' if is_last else ''}'>"
+            if i == 0: html += f"<td rowspan='4' class='room-col'>{rid}</td>"
+            html += f"<td style='background:#fcfcfc;'>{category}</td>"
             
             for d in dates:
-                match = m_df[(m_df['RoomID'] == rid) & (m_df['Date'] == d)]
-                if not match.empty:
-                    occ, bar, price = determine_values(rid, d, match.iloc[0]['Available'], match.iloc[0]['Total'])
-                    if i == 0: val = f"{occ:.1f}%"
-                    elif i == 1: 
-                        bg = BAR_COLORS.get(bar, "#fff")
-                        val = f"<div style='background-color:{bg}; padding:1px;'>{bar}</div>"
-                    else: val = f"{price:,}"
-                    html += f"<td>{val}</td>"
-                else:
+                curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                if curr_match.empty:
                     html += "<td>-</td>"
+                    continue
+                
+                curr_row = curr_match.iloc[0]
+                occ, bar, price = determine_values(rid, d, curr_row['Available'], curr_row['Total'])
+                
+                if i == 0: # 점유율
+                    html += f"<td>{occ:.0f}%</td>"
+                elif i == 1: # Pick-up (전날 대비 변화)
+                    pickup = 0
+                    if not prev_df.empty:
+                        # Date가 string으로 저장되었을 수 있으므로 변환 처리
+                        prev_match = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
+                        if not prev_match.empty:
+                            pickup = prev_match.iloc[0]['Available'] - curr_row['Available']
+                    
+                    p_class = "pickup-plus" if pickup > 0 else ("pickup-minus" if pickup < 0 else "")
+                    p_text = f"+{pickup}" if pickup > 0 else (str(pickup) if pickup < 0 else "-")
+                    html += f"<td class='{p_class}'>{p_text}</td>"
+                elif i == 2: # BAR
+                    bg = BAR_COLORS.get(bar, "#fff")
+                    html += f"<td style='background:{bg}; font-weight:bold;'>{bar}</td>"
+                else: # 커스텀 수식 (판매가)
+                    final_price = price - custom_fee
+                    html += f"<td class='custom-price'>{final_price:,}</td>"
             html += "</tr>"
     html += "</tbody></table>"
     return html
 
-# --- 4. UI ---
+# --- 5. UI 및 실행 ---
 st.set_page_config(layout="wide")
-st.title("🏨 엠버퓨어힐 프리미엄 요금 대시보드")
+st.title("📊 엠버퓨어힐 RMS - 변화량 추적 대시보드")
 
 with st.sidebar:
-    uploaded_files = st.file_uploader("파일 업로드 (여러 개 가능)", type=['xlsx', 'xls'], accept_multiple_files=True)
-    if st.button("🔄 초기화"):
+    st.header("⚙️ 수식 커스텀")
+    # 수기로 관리할 채널 수식 (예: BAR 가격에서 고정 할인액 차감)
+    fee = st.number_input("채널별 고정 할인액 설정 (BAR - N)", value=0, step=1000)
+    
+    st.divider()
+    uploaded_files = st.file_uploader("오늘자 리포트 업로드", accept_multiple_files=True)
+    if st.button("🔄 데이터 초기화"):
         st.session_state.all_data_df = pd.DataFrame()
         st.rerun()
 
+# 오늘 데이터 처리
 if uploaded_files:
     for f in uploaded_files:
         new_df = load_custom_excel(f)
         if not st.session_state.all_data_df.empty:
-            combined = pd.concat([st.session_state.all_data_df, new_df])
-            st.session_state.all_data_df = combined.drop_duplicates(subset=['Date', 'RoomID'], keep='last')
+            st.session_state.all_data_df = pd.concat([st.session_state.all_data_df, new_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='last')
         else:
             st.session_state.all_data_df = new_df
 
+# 메인 분석 화면
 if not st.session_state.all_data_df.empty:
+    # 1. 과거 스냅샷 데이터 로드 (비교용)
+    prev_data = get_yesterday_data()
+    
     tabs = st.tabs([f"{i}월" for i in range(1, 13)])
     for i, tab in enumerate(tabs):
         with tab:
             m = i + 1
             month_df = st.session_state.all_data_df[st.session_state.all_data_df['Date'].apply(lambda x: x.month == m)]
             if not month_df.empty:
-                # 커스텀 HTML 테이블 렌더링
-                st.markdown(render_custom_table(month_df), unsafe_allow_html=True)
+                st.info(f"💡 **Pick-up**: 어제(직전 저장본) 대비 예약 증감입니다. (빨간색: 예약 증가)")
+                # 테이블 렌더링
+                st.markdown(render_rms_table(month_df, prev_data, fee), unsafe_allow_html=True)
+                
+                if st.button(f"🚀 {m}월 데이터 스냅샷 저장", key=f"save_{m}"):
+                    save_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+                    db.collection("daily_snapshots").document(save_id).set({
+                        "work_date": datetime.now().strftime("%Y-%m-%d"),
+                        "data": month_df.to_dict(orient='records'),
+                        "month": m
+                    })
+                    st.success("데이터가 저장되었습니다. 내일 업로드 시 오늘 데이터와 비교됩니다.")
             else:
-                st.info(f"{m}월 데이터 없음")
+                st.info("데이터 없음")
