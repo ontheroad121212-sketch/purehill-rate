@@ -15,7 +15,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 세팅 (절대 생략 없음) ---
+# --- 2. 전역 설정 및 데이터 세팅 (무삭제) ---
 # 판도 변화 시 등급별 유채색 컬러 (BAR1 빨강 ~ BAR8 회색)
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
@@ -48,62 +48,51 @@ FIXED_PRICE_TABLE = {
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
-    
-    # 성수기 주말 강제 적용 (명절)
-    holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", 
-                            "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
-    # 평수기 특정 연휴 (요일 상관없이 주말 바 체계 적용)
+    holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
     holiday_mid_weekends = ["03.01", "05.03", "05.04", "05.05", "06.05", "06.06", "06.07"]
-    # 성수기 특정 기간 (여름 성수기 + 12월 21일~31일 전체 포함)
     upp_period_dates = ["10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08"]
     for i in range(21, 32): upp_period_dates.append(f"12.{i}")
 
-    is_weekend = date_obj.weekday() in [4, 5] # 기본 금,토
-
-    if md in holiday_upp_weekends:
-        season, is_weekend = "UPP", True
-    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates):
-        season = "UPP"
-    elif md in holiday_mid_weekends:
-        season, is_weekend = "MID", True
-    elif (1 <= m <= 3) or (11 <= m <= 12):
-        season = "UND"
-    else:
-        season = "MID"
+    is_weekend = date_obj.weekday() in [4, 5]
+    if md in holiday_upp_weekends: season, is_weekend = "UPP", True
+    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates): season = "UPP"
+    elif md in holiday_mid_weekends: season, is_weekend = "MID", True
+    elif (1 <= m <= 3) or (11 <= m <= 12): season = "UND"
+    else: season = "MID"
 
     type_code = f"{season}{'2' if is_weekend else '1'}"
     return season, is_weekend, type_code
 
 def determine_bar(season, is_weekend, occ):
     if season == "UPP":
-        if is_weekend: # BAR 4 시작
+        if is_weekend:
             if occ >= 81: return "BAR1"
             elif occ >= 51: return "BAR2"
             elif occ >= 31: return "BAR3"
             else: return "BAR4"
-        else: # BAR 5 시작
+        else:
             if occ >= 81: return "BAR2"
             elif occ >= 51: return "BAR3"
             elif occ >= 31: return "BAR4"
             else: return "BAR5"
     elif season == "MID":
-        if is_weekend: # BAR 6 시작
+        if is_weekend:
             if occ >= 81: return "BAR3"
             elif occ >= 51: return "BAR4"
             elif occ >= 31: return "BAR5"
             else: return "BAR6"
-        else: # BAR 7 시작
+        else:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else: # UND
-        if is_weekend: # BAR 7 시작
+    else:
+        if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-        else: # BAR 8 시작
+        else:
             if occ >= 81: return "BAR5"
             elif occ >= 51: return "BAR6"
             elif occ >= 31: return "BAR7"
@@ -120,7 +109,7 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 테이블 렌더러 (HTML) ---
+# --- 4. 테이블 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     dates = sorted(current_df['Date'].unique())
     if mode == "판매가":
@@ -185,7 +174,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table>"
     return html
 
-# --- 5. 사이드바 및 UI ---
+# --- 5. UI 및 로직 ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
@@ -218,15 +207,14 @@ with st.sidebar:
 
     for ch in st.session_state.channel_list:
         with st.expander(f"📦 {ch} 설정"):
-            # 객실 선택 로직 (KeyError 방지)
-            current_selected = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
-            new_selection = []
+            curr_sel = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
+            new_sel = []
             for r in ALL_ROOMS:
-                if st.checkbox(r, value=(r in current_selected), key=f"cb_{ch}_{r}"):
-                    new_selection.append(r)
-            st.session_state.promotions[ch]["selected_rooms"] = new_selection
+                if st.checkbox(r, value=(r in curr_sel), key=f"cb_{ch}_{r}"):
+                    new_sel.append(r)
+            st.session_state.promotions[ch]["selected_rooms"] = new_sel
             
-            for rid in new_selection:
+            for rid in new_sel:
                 st.markdown(f"**{rid} 설정**")
                 st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("프로모션명", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
                 c1, c2 = st.columns(2)
@@ -234,7 +222,8 @@ with st.sidebar:
                 st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=st.session_state.promotions[ch]["config"][rid]['add_price'], step=1000, key=f"ad_{ch}_{rid}")
 
     st.divider()
-    files = st.file_uploader("엑셀 리포트 업로드", accept_multiple_files=True)
+    # ⭐ 대량 파일 업로드 허용
+    files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
     if st.button("🚀 스냅샷 저장"):
         if 'today_df' in st.session_state:
             save_df = st.session_state.today_df.copy()
@@ -246,12 +235,13 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# 데이터 파싱
+# ⭐ 파일 로딩 및 과거/현재 자동 분리 로직
 if files:
-    all_temp = []
+    all_extracted = []
     for f in files:
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
+        file_data = []
         for r_idx in [6, 7, 10, 11, 12]:
             rid = str(df_raw.iloc[r_idx, 0]).strip().upper()
             tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
@@ -259,9 +249,23 @@ if files:
                 if pd.isna(d_val) or pd.isna(av): continue
                 try:
                     d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date() if isinstance(d_val, (int, float)) else datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
-                    all_temp.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
+                    file_data.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot, "FileRef": f.name})
                 except: continue
-    st.session_state.today_df = pd.DataFrame(all_temp)
+        all_extracted.append(pd.DataFrame(file_data))
+
+    if all_extracted:
+        full_df = pd.concat(all_extracted)
+        # 파일명이나 실제 데이터를 기준으로 가장 최신 파일을 "오늘"로 설정
+        # 파일명을 알파벳순 정렬하여 마지막 파일을 오늘로 간주하는 로직 (1/9, 1/20 순서 대응)
+        unique_files = sorted(full_df['FileRef'].unique())
+        
+        if len(unique_files) >= 2:
+            st.session_state.today_df = full_df[full_df['FileRef'] == unique_files[-1]]
+            st.session_state.prev_df = full_df[full_df['FileRef'] == unique_files[-2]]
+            st.info(f"비교 분석: {unique_files[-2]} (과거) vs {unique_files[-1]} (현재)")
+        else:
+            st.session_state.today_df = full_df
+            st.session_state.prev_df = get_snapshot_by_date(comp_date)
 
 # 메인 화면
 if 'today_df' in st.session_state:
