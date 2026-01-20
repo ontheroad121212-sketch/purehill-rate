@@ -1,21 +1,14 @@
 import streamlit as st
 import pandas as pd
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
-from datetime import datetime
 
-# --- 1. 파이어베이스 연결 (보안 설정) ---
+# --- 1. 파이어베이스 연결 ---
 if not firebase_admin._apps:
-    # 깃허브 배포 시에는 st.secrets를 사용하고, 로컬 테스트 시에는 json 파일을 사용하도록 설정
-    try:
-        cred = credentials.Certificate("serviceAccountKey.json")
-        firebase_admin.initialize_app(cred)
-    except:
-        # 스트림릿 클라우드 배포용 세팅
-        fb_dict = st.secrets["firebase"]
-        cred = credentials.Certificate(dict(fb_dict))
-        firebase_admin.initialize_app(cred)
-
+    fb_dict = st.secrets["firebase"]
+    cred = credentials.Certificate(dict(fb_dict))
+    firebase_admin.initialize_app(cred)
 db = firestore.client()
 
 # 특수 기간 설정 (시작일, 종료일, 기준 BAR)
@@ -31,80 +24,83 @@ SPECIAL_PERIODS = [
     {"start": "2026-12-21", "end": "2026-12-31", "base_bar": "BAR 5", "label": "연말 성수기"}
 ]
 
-# --- 2. 설정 데이터 (이 부분을 본인 호텔 수치에 맞게 수정하세요) ---
-ROOM_CONFIG = {
+# --- 2. 호텔 설정 (이 값을 실제 규칙으로 수정하세요) ---
+ROOM_INFO = {
     "FDB": {"total": 32},
     "DBL": {"total": 20}
 }
 
-# BAR 요금표 (예시: 실제 데이터로 교체 가능)
-PRICE_TABLE = {
-    "BAR 1": 300000, "BAR 2": 280000, "BAR 3": 260000, "BAR 4": 240000,
-    "BAR 5": 220000, "BAR 6": 200000, "BAR 7": 180000, "BAR 8": 160000
+# BAR별 요금표 (평일/주말 구분)
+RATE_TABLE = {
+    "FDB": {
+        "BAR 1": {"WD": 300000, "WE": 350000},
+        "BAR 2": {"WD": 280000, "WE": 330000},
+        # ... BAR 8까지 입력
+    }
 }
 
-# --- 3. 로직 함수 ---
-def get_bar_level(occ):
+# --- 3. 핵심 함수 ---
+def determine_final_rate(stay_date, occ):
+    # 1. 특수 기간인지 먼저 확인
+    for period in SPECIAL_PERIODS:
+        start = datetime.strptime(period["start"], "%Y-%m-%d").date()
+        end = datetime.strptime(period["end"], "%Y-%m-%d").date()
+        
+        if start <= stay_date <= end:
+            # 여름 성수기 등 주중/주말 구분이 필요한 특수 케이스
+            if period["label"] == "여름 성수기":
+                return "BAR 4" if stay_date.weekday() >= 4 else "BAR 5"
+            return period["base_bar"]
+
+    # 2. 특수 기간이 아니면 점유율 로직 적용
+    return get_bar_by_occ(occ)
+
+def get_bar(occ):
     if occ >= 90: return "BAR 1"
     elif occ >= 80: return "BAR 2"
-    elif occ >= 70: return "BAR 3"
-    elif occ >= 60: return "BAR 4"
-    elif occ >= 50: return "BAR 5"
-    elif occ >= 40: return "BAR 6"
-    elif occ >= 30: return "BAR 7"
+    # ... 규칙대로 추가
     else: return "BAR 8"
 
-def apply_color(val):
-    # 같은 요금에 같은 색을 입히는 함수
-    colors = {
-        300000: 'background-color: #FFCDD2', # BAR 1
-        280000: 'background-color: #F8BBD0', # BAR 2
-        # ... 요금별 색상 지정
-    }
-    return colors.get(val, '')
+def apply_price_color(val):
+    # 같은 가격은 같은 색으로! (해시 기반 자동 생성)
+    import hashlib
+    if pd.isna(val) or val == 0: return ""
+    color_hash = hashlib.md5(str(val).encode()).hexdigest()[:6]
+    return f'background-color: #{color_hash}; color: black;'
 
-# --- 4. 대시보드 UI ---
-st.set_page_config(layout="wide")
-st.title("🏨 호텔 동적 요금 관리 시스템")
-
-# 월별 탭 생성
-tabs = st.tabs([f"{i}월" for i in range(1, 13)])
+# --- 4. 대시보드 화면 ---
+st.set_page_config(layout="wide", page_title="호텔 요금 관리 시스템")
+st.title("🏨 객실 점유율 기반 동적 요금 대시보드")
 
 with st.sidebar:
-    st.header("⚙️ 컨트롤 패널")
-    mode = st.radio("작업 모드", ["오늘의 수정", "과거 기록 조회"])
-    
-    if mode == "오늘의 수정":
-        uploaded_file = st.file_uploader("재고 현황 엑셀 업로드", type=['xlsx'])
-    else:
-        target_date = st.date_input("조회할 날짜 선택", datetime.now())
+    menu = st.radio("메뉴", ["요금 수정 작업", "과거 기록 조회"])
+    uploaded_file = st.file_uploader("월간 재고 현황 업로드", type=['xlsx'])
 
-# --- 5. 메인 로직 실행 ---
-if mode == "오늘의 수정" and uploaded_file:
+if menu == "요금 수정 작업" and uploaded_file:
+    # 엑셀 데이터 로드 (월별 탭 처리 가능)
     df = pd.read_excel(uploaded_file)
     
-    # 점유율 및 BAR 계산
-    df['OCC'] = ((ROOM_CONFIG["FDB"]["total"] - df['Available']) / ROOM_CONFIG["FDB"]["total"] * 100).round(1)
-    df['BAR'] = df['OCC'].apply(get_bar_level)
-    df['Final_Price'] = df['BAR'].map(PRICE_TABLE)
+    # 1. 점유율 및 BAR 자동 계산
+    df['OCC'] = ((ROOM_INFO["FDB"]["total"] - df['Available']) / ROOM_INFO["FDB"]["total"] * 100).round(1)
+    df['BAR'] = df['OCC'].apply(get_bar)
     
-    # 색상 적용 및 출력
-    st.subheader("📊 실시간 계산 결과")
-    st.dataframe(df.style.applymap(apply_color, subset=['Final_Price']))
-    
-    if st.button("현재 상태 Firebase에 스냅샷 저장"):
+    # 2. 요일 확인 및 요금 매칭
+    # 날짜 컬럼을 기준으로 평일(WD)/주말(WE) 구분 로직 추가 필요
+    df['Final_Price'] = df.apply(lambda row: RATE_TABLE["FDB"][row['BAR']]["WD"], axis=1)
+
+    # 3. 화면 출력 (색상 자동화)
+    st.subheader("📊 오늘의 요금 제안")
+    st.dataframe(df.style.applymap(apply_price_color, subset=['Final_Price']))
+
+    # 4. 저장 버튼
+    if st.button("현재 대시보드 스냅샷 저장"):
         doc_id = datetime.now().strftime("%Y-%m-%d_%H%M")
         db.collection("daily_snapshots").document(doc_id).set({
             "work_date": datetime.now().strftime("%Y-%m-%d"),
             "data": df.to_dict(orient='records')
         })
-        st.success(f"저장 완료! (ID: {doc_id})")
+        st.success("파이어베이스에 기록되었습니다!")
 
-elif mode == "과거 기록 조회":
-    search_date = target_date.strftime("%Y-%m-%d")
-    docs = db.collection("daily_snapshots").where("work_date", "==", search_date).stream()
-    
-    for doc in docs:
-        st.write(f"🕒 기록 시각: {doc.id}")
-        hist_df = pd.DataFrame(doc.to_dict()['data'])
-        st.dataframe(hist_df.style.applymap(apply_color, subset=['Final_Price']))
+elif menu == "과거 기록 조회":
+    target_date = st.date_input("조회 날짜 선택")
+    # 파이어베이스 쿼리 및 결과 출력 로직 (생략)
