@@ -72,7 +72,7 @@ st.title("🏨 호텔 요금 관리 시스템 (월별 탭)")
 # 사이드바 설정
 with st.sidebar:
     mode = st.radio("모드 선택", ["요금 수정", "기록 조회"])
-    uploaded_file = st.file_uploader("엑셀 파일 업로드", type=['xlsx'])
+    uploaded_file = st.file_uploader("엑셀 파일 업로드", type=['xlsx', 'xls'])
 
 # 1월부터 12월까지 탭 생성
 month_names = [f"{i}월" for i in range(1, 13)]
