@@ -6,7 +6,7 @@ from firebase_admin import credentials, firestore
 import math
 import re
 
-# --- 1. 파이버베이스 초기화 ---
+# --- 1. 파이버베이스 초기화 (생략 금지) ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 ---
+# --- 2. 전역 설정 및 데이터 세팅 (절대 삭제 금지) ---
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
     "BAR5": "#2ECC71", "BAR6": "#3498DB", "BAR7": "#0000FF", "BAR8": "#BDC3C7",
@@ -26,6 +26,7 @@ DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
+# [유동 객실] 요금표
 PRICE_TABLE = {
     "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
     "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
@@ -34,6 +35,7 @@ PRICE_TABLE = {
     "HDF": {"BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
 
+# [고정 객실] 시즌/요일별 요금표
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 180000, "UND2": 180000, "MID1": 225000, "MID2": 225000, "UPP1": 285000, "UPP2": 315000},
     "GDF": {"UND1": 375000, "UND2": 375000, "MID1": 410000, "MID2": 410000, "UPP1": 488000, "UPP2": 488000},
@@ -42,7 +44,7 @@ FIXED_PRICE_TABLE = {
     "PPV": {"UND1": 1100000, "UND2": 1100000, "MID1": 1250000, "MID2": 1250000, "UPP1": 1400000, "UPP2": 1400000},
 }
 
-# --- 3. 판별 로직 ---
+# --- 3. 핵심 판별 로직 (시즌/BAR 완벽 동기화) ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
@@ -84,7 +86,7 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else:
+    else: # UND
         if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
@@ -107,10 +109,13 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 테이블 렌더러 ---
+# --- 4. 메인 렌더러 (HTML) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     dates = sorted(current_df['Date'].unique())
-    rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions[ch_name].get("selected_rooms", ALL_ROOMS)
+    if mode == "판매가":
+        rooms_to_show = st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
+    else:
+        rooms_to_show = ALL_ROOMS
     
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<table style='width:100%; border-collapse:collapse; font-size:11px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:150px;'>객실/프로모션</th>"
@@ -137,7 +142,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             style = "border:1px solid #ddd; padding:8px; text-align:center; background-color:white;"
-            
+            content = "-"
+
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
@@ -175,7 +181,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
 # --- 5. UI 및 사이드바 ---
 st.set_page_config(layout="wide")
-st.title("🏨 엠버퓨어힐 통합 수익관리 시스템")
+st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
 if 'promotions' not in st.session_state: st.session_state.promotions = {}
 if 'channel_list' not in st.session_state: st.session_state.channel_list = []
@@ -227,25 +233,21 @@ with st.sidebar:
                 st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=st.session_state.promotions[ch]["config"][rid]['add_price'], step=1000, key=f"ad_{ch}_{rid}")
 
     st.divider()
-    files = st.file_uploader("리포트 업로드 (8~12개)", accept_multiple_files=True)
+    files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
     
-    # ⭐ 파이베 에러 해결용 저장 버튼 로직
     if st.button("🚀 오늘 작업 내역 저장"):
         if not st.session_state.today_df.empty:
-            # 1. 날짜 객체를 문자열로 변환 (파이어베이스 호환용)
             t_df = st.session_state.today_df.copy()
-            t_df['Date'] = t_df['Date'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
-            
+            t_df['Date'] = t_df['Date'].apply(lambda x: x.isoformat())
             p_df_dict = []
             if not st.session_state.prev_df.empty:
                 p_df = st.session_state.prev_df.copy()
-                p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
+                p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat())
                 p_df_dict = p_df.to_dict(orient='records')
 
-            # 2. 파이어베이스 저장 데이터 구성
             save_data = {
                 "work_date": date.today().strftime("%Y-%m-%d"),
-                "save_time": datetime.now().isoformat(), # datetime도 문자열로
+                "save_time": datetime.now().isoformat(),
                 "data": t_df.to_dict(orient='records'),
                 "prev_data": p_df_dict
             }
@@ -255,10 +257,11 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"저장 실패: {e}")
 
-# --- 6. 파일 처리 및 자동 분류 ---
+# --- 6. 파일 처리 및 자동 분류 (파일명 숫자 날짜 인식) ---
 if files:
     all_data = []
     for f in files:
+        # 파일명에서 숫자를 모두 추출하여 날짜 태그 생성
         date_tag = "".join(re.findall(r'\d+', f.name))
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
