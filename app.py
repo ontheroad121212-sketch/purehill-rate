@@ -18,6 +18,19 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
+# 특수 기간 설정 (시작일, 종료일, 기준 BAR)
+SPECIAL_PERIODS = [
+    {"start": "2026-02-13", "end": "2026-02-18", "base_bar": "BAR 4", "label": "성수기 연휴"},
+    {"start": "2026-03-01", "end": "2026-03-01", "base_bar": "BAR 7", "label": "삼일절"},
+    {"start": "2026-05-03", "end": "2026-05-05", "base_bar": "BAR 6", "label": "어린이날 연휴"},
+    {"start": "2026-05-24", "end": "2026-05-26", "base_bar": "BAR 6", "label": "석가탄신일 연휴"},
+    {"start": "2026-06-05", "end": "2026-06-07", "base_bar": "BAR 6", "label": "현충일 연휴"},
+    {"start": "2026-07-17", "end": "2026-08-29", "base_bar": "PEAK", "label": "여름 성수기"}, # 주중/주말 별도 처리
+    {"start": "2026-09-23", "end": "2026-09-28", "base_bar": "BAR 4", "label": "추석 연휴"},
+    {"start": "2026-10-01", "end": "2026-10-08", "base_bar": "BAR 5", "label": "10월 황금연휴"},
+    {"start": "2026-12-21", "end": "2026-12-31", "base_bar": "BAR 5", "label": "연말 성수기"}
+]
+
 # --- 2. 설정 데이터 (이 부분을 본인 호텔 수치에 맞게 수정하세요) ---
 ROOM_CONFIG = {
     "FDB": {"total": 32},
