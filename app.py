@@ -15,6 +15,7 @@ if 'all_data_df' not in st.session_state:
     st.session_state.all_data_df = pd.DataFrame()
 
 WEEKDAYS_KR = ['월', '화', '수', '목', '금', '토', '일']
+ROOM_IDS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 
 # --- 2. 설정 데이터 ---
 PRICE_TABLE = {
@@ -44,110 +45,103 @@ def determine_values(room_id, date_obj, avail, total):
     price = PRICE_TABLE.get(room_id, {}).get(final_bar, 0)
     return occ, final_bar, price
 
-# 직전 스냅샷 가져오기
 def get_last_snapshot():
     docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs: return pd.DataFrame(doc.to_dict()['data'])
     return pd.DataFrame()
 
-# --- 4. 요일/Pick-up/사이트별 커스텀 요금이 포함된 최종 렌더러 ---
-def render_master_table(current_df, prev_df, sites):
-    room_ids = ["FDB", "FDE", "HDP", "HDT", "HDF"]
+# --- 4. 통 구조 렌더러 (HTML) ---
+def render_block_table(current_df, prev_df, sites, title, mode):
     dates = sorted(current_df['Date'].unique())
-    
-    html = """
-    <style>
-        .m-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 11px; }
-        .m-table th, .m-table td { border: 1px solid #ddd; text-align: center; padding: 4px; }
-        .sun { color: red; } .sat { color: blue; }
-        .pickup-cell { background-color: #FFEBEE; color: red; font-weight: bold; }
-        .bar-cell { font-weight: bold; border: 2px solid #333; font-size: 13px; }
-        .site-row { color: #2E7D32; font-weight: bold; }
-        .thick-border { border-bottom: 4px solid black !important; }
-    </style>
-    <table class='m-table'>
+    html = f"""
+    <div style='margin-top:25px; margin-bottom:10px; font-weight:bold; font-size:16px; color:#333; padding-left:5px; border-left:5px solid #000;'>{title}</div>
+    <table style='width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 11px; margin-bottom:30px;'>
         <thead>
-            <tr><th rowspan='2'>Room ID</th><th rowspan='2'>구분</th>
+            <tr style='background:#f2f2f2;'>
+                <th style='border:1px solid #ddd; padding:5px;' rowspan='2'>Room ID</th>
     """
-    for d in dates: html += f"<th>{d.strftime('%m-%d')}</th>"
-    html += "</tr><tr>"
+    if mode == "판매가": html += "<th style='border:1px solid #ddd; padding:5px;' rowspan='2'>채널</th>"
+    
+    for d in dates: html += f"<th style='border:1px solid #ddd; padding:5px;'>{d.strftime('%m-%d')}</th>"
+    html += "</tr><tr style='background:#f2f2f2;'>"
     for d in dates:
         wd = WEEKDAYS_KR[d.weekday()]
-        html += f"<th class='{'sun' if wd=='일' else ('sat' if wd=='토' else '')}'>{wd}</th>"
+        html += f"<th style='border:1px solid #ddd; padding:5px;' class='{'sun' if wd=='일' else ('sat' if wd=='토' else '')}'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
-    for rid in room_ids:
-        # 고정 항목들
-        categories = ["점유율", "Pick-up", "추천BAR"] + [s['name'] for s in sites]
-        
-        for i, cat in enumerate(categories):
-            is_last = (i == len(categories) - 1)
-            html += f"<tr class='{'thick-border' if is_last else ''}'>"
-            if i == 0: html += f"<td rowspan='{len(categories)}' style='font-weight:bold; border-right:2px solid #333; background:#fff;'>{rid}</td>"
+    for rid in ROOM_IDS:
+        rows_in_block = sites if mode == "판매가" else [title]
+        for idx, item in enumerate(rows_in_block):
+            is_last_row = (idx == len(rows_in_block) - 1)
+            border_style = "border-bottom: 3px solid black !important;" if is_last_row else ""
+            html += f"<tr style='{border_style}'>"
             
-            html += f"<td style='background:#f9f9f9;'>{cat}</td>"
+            if idx == 0:
+                html += f"<td rowspan='{len(rows_in_block)}' style='border:1px solid #ddd; font-weight:bold; background:#fff; width:80px;'>{rid}</td>"
+            
+            if mode == "판매가":
+                html += f"<td style='border:1px solid #ddd; background:#f9f9f9; width:80px;'>{item['name']}</td>"
             
             for d in dates:
                 curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
                 if curr_match.empty:
-                    html += "<td>-</td>"
+                    html += "<td style='border:1px solid #ddd;'>-</td>"
                     continue
                 
                 curr_row = curr_match.iloc[0]
                 occ, bar, price = determine_values(rid, d, curr_row['Available'], curr_row['Total'])
                 
-                if cat == "점유율": val = f"{occ:.0f}%"
-                elif cat == "Pick-up":
+                content = "-"
+                style = "border:1px solid #ddd;"
+                
+                if mode == "기준":
+                    bg = BAR_COLORS.get(bar, "#fff")
+                    content = f"<div style='background:{bg}; font-weight:bold; padding:3px;'>{bar}<br><small>({occ:.0f}%)</small></div>"
+                elif mode == "변화":
                     pickup = 0
                     if not prev_df.empty:
                         prev_match = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
                         if not prev_match.empty: pickup = prev_match.iloc[0]['Available'] - curr_row['Available']
-                    val = f"<div class='{'pickup-cell' if pickup > 0 else ''}'>{f'+{pickup}' if pickup > 0 else (pickup if pickup < 0 else '-')}</div>"
-                elif cat == "추천BAR":
-                    val = f"<div class='bar-cell' style='background:{BAR_COLORS.get(bar, '#fff')}'>{bar}</div>"
-                else:
-                    # 사이트별 요금 계산 (BAR 요금 - 할인액)
-                    offset = next((s['offset'] for s in sites if s['name'] == cat), 0)
-                    val = f"<div class='site-row'>{(price - offset):,}</div>"
+                    if pickup > 0:
+                        style += "background-color: #FFEBEE; color: red; font-weight: bold;"
+                        content = f"+{pickup}"
+                    elif pickup < 0: content = str(pickup)
+                    else: content = "-"
+                elif mode == "판매가":
+                    content = f"<b style='color:#2E7D32;'>{(price - item['offset']):,}</b>"
                 
-                html += f"<td>{val}</td>"
+                html += f"<td style='{style}'>{content}</td>"
             html += "</tr>"
     html += "</tbody></table>"
     return html
 
-# --- 5. UI 및 커스텀 사이트 설정 ---
+# --- 5. UI ---
 st.set_page_config(layout="wide")
-st.title("📊 엠버퓨어힐 실시간 수익관리(RMS) 시스템")
+st.title("🏨 엠버퓨어힐 RMS - 3단계 통 대시보드")
 
 if 'sites' not in st.session_state:
     st.session_state.sites = [{"name": "네이버", "offset": 10000}, {"name": "아고다", "offset": 15000}]
 
 with st.sidebar:
-    st.header("🛠️ 사이트별 요금 수식")
+    st.header("⚙️ 채널 설정")
     for i, site in enumerate(st.session_state.sites):
-        col1, col2 = st.columns([2, 1])
-        site['name'] = col1.text_input(f"사이트 {i+1}", value=site['name'], key=f"name_{i}")
-        site['offset'] = col2.number_input(f"할인액", value=site['offset'], step=1000, key=f"off_{i}")
-    
-    if st.button("➕ 사이트 추가"):
+        c1, c2 = st.columns([2, 1])
+        site['name'] = c1.text_input(f"채널 {i+1}", value=site['name'], key=f"n_{i}")
+        site['offset'] = c2.number_input(f"할인액", value=site['offset'], step=1000, key=f"o_{i}")
+    if st.button("➕ 채널 추가"):
         st.session_state.sites.append({"name": "신규", "offset": 0})
         st.rerun()
-
+    
     st.divider()
-    files = st.file_uploader("오늘자 엑셀 리포트", accept_multiple_files=True)
-    if st.button("🚀 데이터 스냅샷 저장"):
+    files = st.file_uploader("엑셀 업로드", accept_multiple_files=True)
+    if st.button("🚀 현재 상태 저장 (Snapshot)"):
         if not st.session_state.all_data_df.empty:
-            db.collection("daily_snapshots").add({
-                "save_time": datetime.now(),
-                "data": st.session_state.all_data_df.to_dict(orient='records')
-            })
-            st.success("오늘 데이터 저장 완료! 내일 비교 기준이 됩니다.")
+            db.collection("daily_snapshots").add({"save_time": datetime.now(), "data": st.session_state.all_data_df.to_dict(orient='records')})
+            st.success("저장 완료!")
 
-# 데이터 로드 및 렌더링
+# 데이터 처리
 if files:
-    # (load_custom_excel 로직 생략 없이 데이터 로드...)
-    # [코드 지면상 이전에 작성한 load_custom_excel 함수가 그대로 들어갑니다]
-    all_new_data = []
+    all_new = []
     for f in files:
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
@@ -158,10 +152,19 @@ if files:
                 if pd.isna(d_val) or pd.isna(av): continue
                 try:
                     d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date().replace(year=2026) if isinstance(d_val, (int, float)) else datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
-                    all_new_data.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
+                    all_new.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
                 except: continue
-    st.session_state.all_data_df = pd.DataFrame(all_new_data)
+    st.session_state.all_data_df = pd.DataFrame(all_new)
 
 if not st.session_state.all_data_df.empty:
     prev_snapshot = get_last_snapshot()
-    st.markdown(render_master_table(st.session_state.all_data_df, prev_snapshot, st.session_state.sites), unsafe_allow_html=True)
+    curr_df = st.session_state.all_data_df
+    
+    # [통 1] 기준 데이터 (BAR & OCC)
+    st.markdown(render_block_table(curr_df, prev_snapshot, [], "1. 기준 데이터 (BAR / 점유율)", "기준"), unsafe_allow_html=True)
+    
+    # [통 2] 변화값 (Pick-up)
+    st.markdown(render_block_table(curr_df, prev_snapshot, [], "2. 변화값 (전일 대비 Pick-up)", "변화"), unsafe_allow_html=True)
+    
+    # [통 3] 채널별 판매가
+    st.markdown(render_block_table(curr_df, prev_snapshot, st.session_state.sites, "3. 채널별 수식 판매가", "판매가"), unsafe_allow_html=True)
