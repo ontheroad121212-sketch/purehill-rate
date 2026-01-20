@@ -127,7 +127,7 @@ def render_custom_table(m_df):
                     if i == 0: val = f"{occ:.1f}%"
                     elif i == 1: 
                         bg = BAR_COLORS.get(bar, "#fff")
-                        val = f"<div style='background-color:{bg}; padding:2px;'>{bar}</div>"
+                        val = f"<div style='background-color:{bg}; padding:1px;'>{bar}</div>"
                     else: val = f"{price:,}"
                     html += f"<td>{val}</td>"
                 else:
