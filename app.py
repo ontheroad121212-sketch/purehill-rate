@@ -6,7 +6,7 @@ from firebase_admin import credentials, firestore
 import math
 import re
 
-# --- 1. 파이버베이스 초기화 ---
+# --- 1. 파이버베이스 초기화 (안전한 초기화) ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 (컬러 및 객실 정의) ---
+# --- 2. 전역 설정 데이터 (수정 금지) ---
 BAR_GRADIENT_COLORS = {
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
@@ -30,7 +30,6 @@ DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
-# [요금표]
 PRICE_TABLE = {
     "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
     "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
@@ -49,49 +48,72 @@ FIXED_PRICE_TABLE = {
 # --- 3. 로직 함수 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
-    md = f"{m:02d}.{d:02d}"
-    holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
-    holiday_mid_weekends = ["03.01", "05.03", "05.04", "05.05", "06.05", "06.06", "06.07"]
-    upp_period_dates = ["10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08"]
-    for i in range(21, 32): upp_period_dates.append(f"12.{i}")
-    is_weekend = date_obj.weekday() in [4, 5]
-    if md in holiday_upp_weekends: season, is_weekend = "UPP", True
-    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates): season = "UPP"
-    elif md in holiday_mid_weekends: season, is_weekend = "MID", True
-    elif (1 <= m <= 3) or (11 <= m <= 12): season = "UND"
-    else: season = "MID"
-    return f"{season}{'2' if is_weekend else '1'}", season, is_weekend
+    md = f"{m:02d}.{d:02d}"  # 날짜를 '02.13' 형태로 변환
+    
+    # 실제 요일 (4:금, 5:토 이면 주말)
+    actual_is_weekend = date_obj.weekday() in [4, 5]
+    
+    # --- [예외 규칙 1] 강제 성수기 주말 (UPP2) ---
+    # 2월 13~18일, 9월 23~28일 (요일 상관없이 무조건 성수기 주말)
+    if ("02.13" <= md <= "02.18") or ("09.23" <= md <= "09.28"):
+        season, is_weekend = "UPP", True
+        
+    # --- [예외 규칙 2] 강제 성수기 주중 (UPP1) ---
+    # 12월 21~31일, 10월 1~8일 (요일 상관없이 무조건 성수기 주중)
+    elif ("12.21" <= md <= "12.31") or ("10.01" <= md <= "10.08"):
+        season, is_weekend = "UPP", False
+        
+    # --- [예외 규칙 3] 강제 평수기 주말 (MID2) ---
+    # 5월 3~5일, 5월 24~26일, 6월 5~7일 (요일 상관없이 무조건 평수기 주말)
+    elif ("05.03" <= md <= "05.05") or ("05.24" <= md <= "05.26") or ("06.05" <= md <= "06.07"):
+        season, is_weekend = "MID", True
+
+    # --- [일반 규칙 1] 성수기 기간 (7/17 ~ 8/29) ---
+    elif "07.17" <= md <= "08.29":
+        season, is_weekend = "UPP", actual_is_weekend
+        
+    # --- [일반 규칙 2] 비수기 기본 (1/4~3/31, 11/1~12/20) ---
+    elif ("01.04" <= md <= "03.31") or ("11.01" <= md <= "12.20"):
+        season, is_weekend = "UND", actual_is_weekend
+        
+    # --- [일반 규칙 3] 평수기 기본 (나머지 전체) ---
+    else:
+        season, is_weekend = "MID", actual_is_weekend
+
+    # 최종 코드 생성
+    type_code = f"{season}{'2' if is_weekend else '1'}"
+    return type_code, season, is_weekend
 
 def determine_bar(season, is_weekend, occ):
     if season == "UPP":
-        if is_weekend:
+        if is_weekend: # BAR 4 ~ BAR 1
             if occ >= 81: return "BAR1"
             elif occ >= 51: return "BAR2"
             elif occ >= 31: return "BAR3"
             else: return "BAR4"
-        else:
+        else: # BAR 5 ~ BAR 2
             if occ >= 81: return "BAR2"
             elif occ >= 51: return "BAR3"
             elif occ >= 31: return "BAR4"
             else: return "BAR5"
     elif season == "MID":
-        if is_weekend:
+        if is_weekend: # BAR 6 ~ BAR 3
             if occ >= 81: return "BAR3"
             elif occ >= 51: return "BAR4"
             elif occ >= 31: return "BAR5"
             else: return "BAR6"
-        else:
+        else: # BAR 7 ~ BAR 4
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else:
-        if is_weekend:
+    else: # UND (비수기)
+        if is_weekend: # BAR 7 ~ BAR 4
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-        else:
+        else: # BAR 8 ~ BAR 5
             if occ >= 81: return "BAR5"
             elif occ >= 51: return "BAR6"
             elif occ >= 31: return "BAR7"
@@ -108,9 +130,9 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 ---
+# --- 4. 렌더러 (채도 적용 및 가로 스크롤) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
-    if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
+    if current_df.empty: return "<div style='padding:20px;'>리포트를 업로드하거나 데이터를 로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     
@@ -128,8 +150,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     for rid in rooms_to_show:
         label = rid
         if mode == "판매가":
-            cfg_p = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"name": rid})
-            label = f"<b>{rid}</b><br><small style='color:blue;'>{cfg_p.get('name', rid)}</small>"
+            ch_cfg = st.session_state.promotions.get(ch_name, {}).get("config", {})
+            rid_cfg = ch_cfg.get(rid, {"name": rid})
+            label = f"<b>{rid}</b><br><small style='color:blue;'>{rid_cfg.get('name', rid)}</small>"
         
         border_thick = "border-bottom:3.4px solid #000;" if rid in ["HDF", "PPV"] else ""
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'>{label}</td>"
@@ -149,7 +172,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
 
             if mode == "기준":
-                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F9F9F9"
+                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
                 content = f"<b>{bar}</b><br>{occ:.0f}%"
             elif mode == "변화":
@@ -170,9 +193,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     content = f"▲ {bar}"
                 else: content = bar
             elif mode == "판매가":
-                conf_s = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
-                after_disc = base_price * (1 - (conf_s.get('discount_rate', 0) / 100))
-                final_p = int((math.floor(after_disc / 1000) * 1000) + conf_s.get('add_price', 0))
+                conf = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
+                after_disc = base_price * (1 - (conf.get('discount_rate', 0) / 100))
+                final_p = int((math.floor(after_disc / 1000) * 1000) + conf.get('add_price', 0))
                 content = f"<b>{final_p:,}</b>"
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
@@ -195,10 +218,7 @@ def robust_date_parser(d_val):
     return None
 
 def save_channel_configs():
-    db.collection("settings").document("channels").set({
-        "channel_list": st.session_state.channel_list, 
-        "promotions": st.session_state.promotions
-    })
+    db.collection("settings").document("channels").set({"channel_list": st.session_state.channel_list, "promotions": st.session_state.promotions})
 
 def load_channel_configs():
     doc = db.collection("settings").document("channels").get()
@@ -214,15 +234,15 @@ def load_channel_configs():
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
-# 🔴 AttributeError 방지: 세션 초기화 및 로드 순서 강제 고정
+# 중요: AttributeError 방지를 위해 세션 데이터 우선 로드
 if 'channel_list' not in st.session_state:
     load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 
 with st.sidebar:
-    st.header("📅 수정 내역 공유/조회")
-    work_day = st.date_input("작업 날짜 선택", value=date.today())
+    st.header("📅 수정 내역 공유")
+    work_day = st.date_input("조회할 작업 날짜", value=date.today())
     if st.button("📂 팀 데이터 로드"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
@@ -237,7 +257,7 @@ with st.sidebar:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', list(st.session_state.promotions.keys()))
             found = True
-        if found: st.success("데이터 로드 성공")
+        if found: st.success("팀 공유 데이터 로드 완료")
         else: st.warning("내역 없음")
 
     st.divider()
@@ -269,7 +289,7 @@ with st.sidebar:
             if st.button(f"💾 {ch} 저장", key=f"s_{ch}"): save_channel_configs(); st.success("저장됨")
 
     st.divider()
-    files = st.file_uploader("리포트 업로드", accept_multiple_files=True)
+    files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
     if st.button("🚀 오늘 내역 팀 공유 저장"):
         if not st.session_state.today_df.empty:
             t_df = st.session_state.today_df.copy()
@@ -289,20 +309,21 @@ with st.sidebar:
             })
             st.success("팀 공유 서버 저장 완료!")
 
-# --- 7. 파일 로직 (알려주신 고정 행 번호 적용) ---
+# --- 7. 파일 로직 (알려주신 고정 행 번호 100% 적용) ---
 if files:
     all_extracted = []
-    # 사용자 지정 행: GDB(5), GDF(6), FPT(9), FFD(10), PPV(14) / 유동객실(6,7,10,11,12)
-    # 인덱스 변환: 5행 -> 4, 6행 -> 5, 9행 -> 8, 10행 -> 9, 14행 -> 13
+    # 🔴 사용자 지정 행번호 고정 매칭
+    # 5행(idx 4), 6행(idx 5), 9행(idx 8), 10행(idx 9), 14행(idx 13)
     FIXED_MAP = {4: "GDB", 5: "GDF", 8: "FPT", 9: "FFD", 13: "PPV"}
-    DYN_MAP = {5: "FDB", 6: "FDE", 9: "HDP", 10: "HDT", 11: "HDF"}
+    # 기존 유동 객실 5종 매칭 (7, 8, 11, 12, 13행 기준)
+    DYN_MAP = {6: "FDB", 7: "FDE", 10: "HDP", 11: "HDT", 12: "HDF"}
 
     for f in files:
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
         
-        # 고정 및 유동 객실 데이터 취합
+        # 고정 및 유동 객실 데이터 강제 병합
         for r_idx, rid in {**FIXED_MAP, **DYN_MAP}.items():
             if r_idx < len(df_raw):
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
@@ -321,8 +342,8 @@ if files:
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
-    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급 채도 적용)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (고정 행 매칭 완료)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급별 채도 적용)", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (행 번호 고정 매칭 완료)", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
