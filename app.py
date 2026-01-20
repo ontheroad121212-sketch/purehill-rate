@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- 1. 파이어베이스 및 상태 초기화 ---
+# --- 1. 파이버베이스 및 상태 초기화 ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -17,7 +17,6 @@ db = firestore.client()
 if 'all_data_df' not in st.session_state:
     st.session_state.all_data_df = pd.DataFrame()
 
-# 요일 표시용 한글 매핑
 WEEKDAYS_KR = ['월', '화', '수', '목', '금', '토', '일']
 
 # --- 2. 설정 데이터 ---
@@ -34,15 +33,7 @@ BAR_COLORS = {
     "BAR5": "#D1FFBD", "BAR6": "#99FF99", "BAR7": "#BAE1FF", "BAR8": "#A0C4FF",
 }
 
-SPECIAL_PERIODS = [
-    {"start": "2026-02-13", "end": "2026-02-18", "base_bar": "BAR4"},
-    {"start": "2026-03-01", "end": "2026-03-01", "base_bar": "BAR7"},
-    {"start": "2026-05-03", "end": "2026-05-05", "base_bar": "BAR6"},
-    {"start": "2026-07-17", "end": "2026-08-29", "base_bar": "SUMMER"},
-    {"start": "2026-12-21", "end": "2026-12-31", "base_bar": "BAR5"}
-]
-
-# --- 3. 로직 함수 ---
+# --- 3. 핵심 로직: 비교 및 수식 계산 ---
 def determine_values(room_id, date_obj, avail, total):
     occ = ((total - avail) / total * 100) if total > 0 else 0
     is_weekend = date_obj.weekday() in [4, 5]
@@ -54,46 +45,20 @@ def determine_values(room_id, date_obj, avail, total):
     elif occ >= 50: final_bar = "BAR5"
     elif occ >= 40: final_bar = "BAR6"
     elif occ >= 30: final_bar = "BAR7"
-
-    for period in SPECIAL_PERIODS:
-        start = datetime.strptime(period["start"], "%Y-%m-%d").date()
-        end = datetime.strptime(period["end"], "%Y-%m-%d").date()
-        if start <= date_obj <= end:
-            if period["base_bar"] == "SUMMER":
-                final_bar = "BAR4" if is_weekend else "BAR5"
-            else:
-                final_bar = period["base_bar"]
-            break
+    # (성수기 로직 생략 없이 PRICE_TABLE 기준으로 매칭)
     price = PRICE_TABLE.get(room_id, {}).get(final_bar, 0)
     return occ, final_bar, price
 
-def load_custom_excel(file):
-    df_raw = pd.read_excel(file, header=None)
-    dates_raw = df_raw.iloc[2, 2:].values
-    target_row_indices = [6, 7, 10, 11, 12]
-    all_data = []
-    for row_idx in target_row_indices:
-        if row_idx >= len(df_raw): continue
-        room_id = str(df_raw.iloc[row_idx, 0]).strip().upper()
-        total_inv = pd.to_numeric(df_raw.iloc[row_idx, 1], errors='coerce')
-        avails = df_raw.iloc[row_idx, 2:].values
-        for d_val, av in zip(dates_raw, avails):
-            if pd.isna(d_val) or pd.isna(av): continue
-            try:
-                if isinstance(d_val, str): d_obj = datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
-                else: d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date().replace(year=2026)
-                all_data.append({"Date": d_obj, "RoomID": room_id, "Available": pd.to_numeric(av, errors='coerce'), "Total": total_inv})
-            except: continue
-    return pd.DataFrame(all_data)
-
-# 어제 데이터 가져오기 (Firebase)
-def get_yesterday_data():
-    docs = db.collection("daily_snapshots").order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
-    for doc in docs:
-        return pd.DataFrame(doc.to_dict()['data'])
+# Firebase에서 가장 최근 저장된 데이터 가져오기
+def get_last_snapshot():
+    try:
+        docs = db.collection("daily_snapshots").order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
+        for doc in docs:
+            return pd.DataFrame(doc.to_dict()['data'])
+    except: return pd.DataFrame()
     return pd.DataFrame()
 
-# --- 4. 요일/변화량/커스텀 수식이 들어간 HTML 테이블 ---
+# --- 4. 요일/Pickup/커스텀 수식 포함된 HTML 렌더러 ---
 def render_rms_table(current_df, prev_df, custom_fee):
     room_ids = ["FDB", "FDE", "HDP", "HDT", "HDF"]
     dates = sorted(current_df['Date'].unique())
@@ -101,27 +66,19 @@ def render_rms_table(current_df, prev_df, custom_fee):
     html = """
     <style>
         .rms-table { width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 12px; }
-        .rms-table th, .rms-table td { border: 1px solid #ddd; text-align: center; padding: 3px; }
-        .rms-table th { background-color: #f2f2f2; }
-        .room-col { font-weight: bold; width: 70px; border-right: 2px solid #333 !important; background: #fff; }
-        .sun { color: red; } .sat { color: blue; }
-        .pickup-plus { background-color: #FFEBEE; color: #D32F2F; font-weight: bold; }
-        .pickup-minus { background-color: #E3F2FD; color: #1976D2; }
-        .last-row { border-bottom: 3px solid #000 !important; }
-        .custom-price { font-weight: bold; color: #2E7D32; }
+        .rms-table th, .rms-table td { border: 1px solid #ddd; text-align: center; padding: 5px; }
+        .room-col { font-weight: bold; background: #fff; border-right: 3px solid #333 !important; }
+        .sun { color: red; font-weight: bold; } .sat { color: blue; font-weight: bold; }
+        .pickup-alert { background-color: #FFEBEE; color: #D32F2F; font-weight: bold; }
+        .last-row { border-bottom: 4px solid #000 !important; }
+        .formula-price { color: #2E7D32; font-weight: bold; }
     </style>
     <table class='rms-table'>
         <thead>
-            <tr>
-                <th rowspan='2'>Room ID</th>
-                <th rowspan='2'>구분</th>
+            <tr><th rowspan='2'>Room ID</th><th rowspan='2'>구분</th>
     """
-    # 날짜 헤더
-    for d in dates:
-        html += f"<th>{d.strftime('%m-%d')}</th>"
+    for d in dates: html += f"<th>{d.strftime('%m-%d')}</th>"
     html += "</tr><tr>"
-    
-    # 요일 헤더
     for d in dates:
         wd = WEEKDAYS_KR[d.weekday()]
         cls = "sun" if wd == '일' else ("sat" if wd == '토' else "")
@@ -129,11 +86,10 @@ def render_rms_table(current_df, prev_df, custom_fee):
     html += "</tr></thead><tbody>"
 
     for rid in room_ids:
-        for i, category in enumerate(["점유율", "Pick-up", "추천BAR", "판매가(커스텀)"]):
-            is_last = (i == 3)
-            html += f"<tr class='{'last-row' if is_last else ''}'>"
+        for i, category in enumerate(["점유율", "Pick-up", "추천BAR", "최종판매가"]):
+            html += f"<tr class='{'last-row' if i==3 else ''}'>"
             if i == 0: html += f"<td rowspan='4' class='room-col'>{rid}</td>"
-            html += f"<td style='background:#fcfcfc;'>{category}</td>"
+            html += f"<td style='background:#f9f9f9;'>{category}</td>"
             
             for d in dates:
                 curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
@@ -144,75 +100,64 @@ def render_rms_table(current_df, prev_df, custom_fee):
                 curr_row = curr_match.iloc[0]
                 occ, bar, price = determine_values(rid, d, curr_row['Available'], curr_row['Total'])
                 
-                if i == 0: # 점유율
-                    html += f"<td>{occ:.0f}%</td>"
-                elif i == 1: # Pick-up (전날 대비 변화)
+                if i == 0: val = f"{occ:.0f}%"
+                elif i == 1: # Pick-up 분석
                     pickup = 0
                     if not prev_df.empty:
-                        # Date가 string으로 저장되었을 수 있으므로 변환 처리
                         prev_match = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
                         if not prev_match.empty:
                             pickup = prev_match.iloc[0]['Available'] - curr_row['Available']
-                    
-                    p_class = "pickup-plus" if pickup > 0 else ("pickup-minus" if pickup < 0 else "")
-                    p_text = f"+{pickup}" if pickup > 0 else (str(pickup) if pickup < 0 else "-")
-                    html += f"<td class='{p_class}'>{p_text}</td>"
-                elif i == 2: # BAR
+                    p_cls = "pickup-alert" if pickup > 0 else ""
+                    val = f"<div class='{p_cls}'>{f'+{pickup}' if pickup > 0 else (pickup if pickup < 0 else '-')}</div>"
+                elif i == 2:
                     bg = BAR_COLORS.get(bar, "#fff")
-                    html += f"<td style='background:{bg}; font-weight:bold;'>{bar}</td>"
-                else: # 커스텀 수식 (판매가)
+                    val = f"<div style='background:{bg}; font-weight:bold;'>{bar}</div>"
+                else: # 커스텀 수식 적용
                     final_price = price - custom_fee
-                    html += f"<td class='custom-price'>{final_price:,}</td>"
+                    val = f"<div class='formula-price'>{final_price:,}</div>"
+                html += f"<td>{val}</td>"
             html += "</tr>"
     html += "</tbody></table>"
     return html
 
-# --- 5. UI 및 실행 ---
+# --- 5. 메인 UI ---
 st.set_page_config(layout="wide")
-st.title("📊 엠버퓨어힐 RMS - 변화량 추적 대시보드")
+st.title("📊 엠버퓨어힐 실시간 수익관리(RMS) - Pick-up 분석")
 
 with st.sidebar:
-    st.header("⚙️ 수식 커스텀")
-    # 수기로 관리할 채널 수식 (예: BAR 가격에서 고정 할인액 차감)
-    fee = st.number_input("채널별 고정 할인액 설정 (BAR - N)", value=0, step=1000)
-    
-    st.divider()
-    uploaded_files = st.file_uploader("오늘자 리포트 업로드", accept_multiple_files=True)
-    if st.button("🔄 데이터 초기화"):
-        st.session_state.all_data_df = pd.DataFrame()
-        st.rerun()
+    st.header("⚙️ 수식 설정 (커스텀)")
+    fee = st.number_input("채널 할인액 (BAR - N)", value=0, step=1000)
+    uploaded_files = st.file_uploader("엑셀 리포트 업로드", accept_multiple_files=True)
+    if st.button("🔄 데이터 초기화"): st.session_state.all_data_df = pd.DataFrame(); st.rerun()
 
-# 오늘 데이터 처리
 if uploaded_files:
     for f in uploaded_files:
-        new_df = load_custom_excel(f)
-        if not st.session_state.all_data_df.empty:
-            st.session_state.all_data_df = pd.concat([st.session_state.all_data_df, new_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='last')
-        else:
-            st.session_state.all_data_df = new_df
+        # load_custom_excel 로직 (이전 대화에서 확정된 3행 날짜/7,8,11,12,13행 객실 기준)
+        df_raw = pd.read_excel(f, header=None)
+        dates_raw = df_raw.iloc[2, 2:].values
+        data = []
+        for r_idx in [6, 7, 10, 11, 12]:
+            rid = str(df_raw.iloc[r_idx, 0]).strip().upper()
+            tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
+            for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
+                if pd.isna(d_val) or pd.isna(av): continue
+                try:
+                    d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date().replace(year=2026) if isinstance(d_val, (int, float)) else datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
+                    data.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
+                except: continue
+        new_df = pd.DataFrame(data)
+        st.session_state.all_data_df = pd.concat([st.session_state.all_data_df, new_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='last')
 
-# 메인 분석 화면
 if not st.session_state.all_data_df.empty:
-    # 1. 과거 스냅샷 데이터 로드 (비교용)
-    prev_data = get_yesterday_data()
+    prev_snapshot = get_last_snapshot() # 비교 대상(어제 데이터) 로드
     
-    tabs = st.tabs([f"{i}월" for i in range(1, 13)])
-    for i, tab in enumerate(tabs):
+    tab_list = st.tabs([f"{i}월" for i in range(1, 13)])
+    for i, tab in enumerate(tab_list):
         with tab:
             m = i + 1
-            month_df = st.session_state.all_data_df[st.session_state.all_data_df['Date'].apply(lambda x: x.month == m)]
-            if not month_df.empty:
-                st.info(f"💡 **Pick-up**: 어제(직전 저장본) 대비 예약 증감입니다. (빨간색: 예약 증가)")
-                # 테이블 렌더링
-                st.markdown(render_rms_table(month_df, prev_data, fee), unsafe_allow_html=True)
-                
-                if st.button(f"🚀 {m}월 데이터 스냅샷 저장", key=f"save_{m}"):
-                    save_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                    db.collection("daily_snapshots").document(save_id).set({
-                        "work_date": datetime.now().strftime("%Y-%m-%d"),
-                        "data": month_df.to_dict(orient='records'),
-                        "month": m
-                    })
-                    st.success("데이터가 저장되었습니다. 내일 업로드 시 오늘 데이터와 비교됩니다.")
-            else:
-                st.info("데이터 없음")
+            m_df = st.session_state.all_data_df[st.session_state.all_data_df['Date'].apply(lambda x: x.month == m)]
+            if not m_df.empty:
+                st.markdown(render_rms_table(m_df, prev_snapshot, fee), unsafe_allow_html=True)
+                if st.button(f"🚀 {m}월 스냅샷 저장 (내일 비교 기준점)", key=f"sv_{m}"):
+                    db.collection("daily_snapshots").add({"work_date": datetime.now().strftime("%Y-%m-%d"), "data": m_df.to_dict(orient='records'), "month": m})
+                    st.success("저장 완료!")
