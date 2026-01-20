@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 (무삭제) ---
+# --- 2. 전역 설정 및 데이터 ---
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
     "BAR5": "#2ECC71", "BAR6": "#3498DB", "BAR7": "#0000FF", "BAR8": "#BDC3C7",
@@ -42,7 +42,7 @@ FIXED_PRICE_TABLE = {
     "PPV": {"UND1": 1100000, "UND2": 1100000, "MID1": 1250000, "MID2": 1250000, "UPP1": 1400000, "UPP2": 1400000},
 }
 
-# --- 3. 시즌 및 BAR 판별 로직 ---
+# --- 3. 판별 로직 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
@@ -173,9 +173,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table>"
     return html
 
-# --- 5. UI 및 메인 로직 ---
+# --- 5. UI 및 사이드바 ---
 st.set_page_config(layout="wide")
-st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
+st.title("🏨 엠버퓨어힐 통합 수익관리 시스템")
 
 if 'promotions' not in st.session_state: st.session_state.promotions = {}
 if 'channel_list' not in st.session_state: st.session_state.channel_list = []
@@ -184,7 +184,6 @@ if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 
 with st.sidebar:
     st.header("📅 작업 날짜별 수정 내역 조회")
-    # ⭐ 핵심: 1월 20일을 선택하면 그날의 "수정 내역(변화량)"을 불러옴
     work_day = st.date_input("조회할 작업 날짜", value=date.today())
     if st.button("📂 해당 날짜 데이터 호출"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
@@ -193,13 +192,12 @@ with st.sidebar:
             d_dict = doc.to_dict()
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
             st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
-            # DB에 함께 저장된 "이전 데이터(비교군)"를 복구
             if 'prev_data' in d_dict:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
             found = True
-        if found: st.success(f"{work_day} 작업 내역을 불러왔습니다!")
-        else: st.warning("해당 날짜에 저장된 내역이 없습니다.")
+        if found: st.success(f"{work_day} 작업 내역 호출 성공!")
+        else: st.warning("저장된 내역이 없습니다.")
 
     st.divider()
     st.header("🎯 채널 관리")
@@ -215,37 +213,52 @@ with st.sidebar:
 
     for ch in st.session_state.channel_list:
         with st.expander(f"📦 {ch} 상세 설정"):
-            curr_rooms = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
-            updated_rooms = []
+            curr_sel = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
+            new_sel = []
             for r in ALL_ROOMS:
-                if st.checkbox(r, value=(r in curr_rooms), key=f"cb_{ch}_{r}"):
-                    updated_rooms.append(r)
-            st.session_state.promotions[ch]["selected_rooms"] = updated_rooms
-            for rid in updated_rooms:
+                if st.checkbox(r, value=(r in curr_sel), key=f"cb_{ch}_{r}"):
+                    new_sel.append(r)
+            st.session_state.promotions[ch]["selected_rooms"] = new_sel
+            for rid in new_sel:
                 st.markdown(f"**{rid}**")
-                st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("명칭", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("프로모션명", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
                 c1, c2 = st.columns(2)
                 st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인율(%)", value=st.session_state.promotions[ch]["config"][rid]['discount_rate'], key=f"ds_{ch}_{rid}")
                 st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=st.session_state.promotions[ch]["config"][rid]['add_price'], step=1000, key=f"ad_{ch}_{rid}")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (8~12개)", accept_multiple_files=True)
+    
+    # ⭐ 파이베 에러 해결용 저장 버튼 로직
     if st.button("🚀 오늘 작업 내역 저장"):
         if not st.session_state.today_df.empty:
+            # 1. 날짜 객체를 문자열로 변환 (파이어베이스 호환용)
+            t_df = st.session_state.today_df.copy()
+            t_df['Date'] = t_df['Date'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
+            
+            p_df_dict = []
+            if not st.session_state.prev_df.empty:
+                p_df = st.session_state.prev_df.copy()
+                p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat() if hasattr(x, 'isoformat') else str(x))
+                p_df_dict = p_df.to_dict(orient='records')
+
+            # 2. 파이어베이스 저장 데이터 구성
             save_data = {
                 "work_date": date.today().strftime("%Y-%m-%d"),
-                "save_time": datetime.now(),
-                "data": st.session_state.today_df.to_dict(orient='records'),
-                "prev_data": st.session_state.prev_df.to_dict(orient='records') # 비교군까지 통째로 저장
+                "save_time": datetime.now().isoformat(), # datetime도 문자열로
+                "data": t_df.to_dict(orient='records'),
+                "prev_data": p_df_dict
             }
-            db.collection("daily_snapshots").add(save_data)
-            st.success("오늘의 수정 내역이 성공적으로 저장되었습니다!")
+            try:
+                db.collection("daily_snapshots").add(save_data)
+                st.success("데이터가 안전하게 저장되었습니다!")
+            except Exception as e:
+                st.error(f"저장 실패: {e}")
 
-# --- 6. 파일 처리 및 자동 분류 (파일명 기반 강제 비교) ---
+# --- 6. 파일 처리 및 자동 분류 ---
 if files:
     all_data = []
     for f in files:
-        # 파일명에서 날짜 추출 (예: 20260120)
         date_tag = "".join(re.findall(r'\d+', f.name))
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
@@ -269,14 +282,14 @@ if files:
         else:
             st.session_state.today_df = full_df
 
-# --- 7. 화면 출력 ---
+# --- 7. 메인 화면 출력 ---
 if not st.session_state.today_df.empty:
     curr = st.session_state.today_df
     prev = st.session_state.prev_df
     
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (10개 객실 통합)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (유채색 원색 알림)", mode="판도변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up 분석)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (유채색 등급 알림)", mode="판도변화"), unsafe_allow_html=True)
     
     st.divider()
     for ch in st.session_state.channel_list:
