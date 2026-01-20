@@ -96,7 +96,7 @@ def render_custom_table(m_df):
         .room-id-cell { font-weight: bold; background-color: #ffffff; width: 80px; border-right: 2px solid #333 !important; }
         .occ-row { font-size: 10px; color: #888; height: 15px; }
         .bar-row { font-weight: bold; font-size: 14px; }
-        .price-row { border-bottom: 4px solid #000 !important; } /* 객실 사이 굵은 줄 */
+        .price-row { border-bottom: 1px solid #000 !important; } /* 객실 사이 굵은 줄 */
     </style>
     <table class='hotel-table'>
         <thead>
