@@ -6,7 +6,7 @@ from firebase_admin import credentials, firestore
 import math
 import re
 
-# --- 1. 파이버베이스 초기화 ---
+# --- 1. 파이버베이스 초기화 (중복 실행 방지) ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 세팅 (무삭제) ---
+# --- 2. 전역 설정 및 데이터 (절대 삭제 금지) ---
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
     "BAR5": "#2ECC71", "BAR6": "#3498DB", "BAR7": "#0000FF", "BAR8": "#BDC3C7",
@@ -26,7 +26,7 @@ DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
-# [유동 객실] 요금표
+# [유동 객실 5종] BAR 요금표
 PRICE_TABLE = {
     "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
     "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
@@ -35,7 +35,7 @@ PRICE_TABLE = {
     "HDF": {"BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
 
-# [고정 객실] 요금표
+# [고정 객실 5종] 시즌/요일 요금표
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 180000, "UND2": 180000, "MID1": 225000, "MID2": 225000, "UPP1": 285000, "UPP2": 315000},
     "GDF": {"UND1": 375000, "UND2": 375000, "MID1": 410000, "MID2": 410000, "UPP1": 488000, "UPP2": 488000},
@@ -44,7 +44,7 @@ FIXED_PRICE_TABLE = {
     "PPV": {"UND1": 1100000, "UND2": 1100000, "MID1": 1250000, "MID2": 1250000, "UPP1": 1400000, "UPP2": 1400000},
 }
 
-# --- 3. 판별 로직 ---
+# --- 3. 핵심 시즌 및 BAR 판별 로직 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
@@ -109,9 +109,18 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 메인 렌더러 ---
+# --- 4. 데이터 로드 및 렌더러 ---
+def get_snapshot_by_date(selected_date):
+    date_str = selected_date.strftime("%Y-%m-%d")
+    docs = db.collection("daily_snapshots").where("work_date", "==", date_str).limit(1).stream()
+    for doc in docs:
+        df = pd.DataFrame(doc.to_dict()['data'])
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        return df, doc.to_dict().get('prev_data', [])
+    return pd.DataFrame(), []
+
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
-    if current_df.empty: return "<div>데이터를 업로드하세요.</div>"
+    if current_df.empty: return "<div>조회된 데이터가 없습니다.</div>"
     dates = sorted(current_df['Date'].unique())
     rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     
@@ -127,7 +136,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     for rid in rooms_to_show:
         label = rid
         if mode == "판매가":
-            # 안전하게 config 참조 (KeyError 방지)
             ch_cfg = st.session_state.promotions.get(ch_name, {}).get("config", {})
             rid_cfg = ch_cfg.get(rid, {"name": rid})
             label = f"<b>{rid}</b><br><small style='color:blue;'>{rid_cfg.get('name', rid)}</small>"
@@ -165,7 +173,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     content = f"▲ {bar}"
                 else: content = bar
             elif mode == "판매가":
-                conf = st.session_state.promotions[ch_name]["config"].get(rid, {"discount_rate": 0, "add_price": 0})
+                conf = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
                 after_disc = base_price * (1 - (conf.get('discount_rate', 0) / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + conf.get('add_price', 0))
                 content = f"<b>{final_p:,}</b>"
@@ -192,17 +200,13 @@ with st.sidebar:
     st.header("📅 수정 내역 조회")
     work_day = st.date_input("작업 날짜 선택", value=date.today())
     if st.button("📂 데이터 로드"):
-        docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
-        found = False
-        for doc in docs:
-            d_dict = doc.to_dict()
-            st.session_state.today_df = pd.DataFrame(d_dict['data'])
-            st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
-            if 'prev_data' in d_dict:
-                st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
+        t_df, p_data = get_snapshot_by_date(work_day)
+        if not t_df.empty:
+            st.session_state.today_df = t_df
+            st.session_state.prev_df = pd.DataFrame(p_data)
+            if not st.session_state.prev_df.empty:
                 st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
-            found = True
-        if found: st.success("데이터 호출 성공")
+            st.success("작업 내역을 성공적으로 불러왔습니다.")
         else: st.warning("내역이 없습니다.")
 
     st.divider()
@@ -211,7 +215,7 @@ with st.sidebar:
     if st.button("➕ 채널 추가") and new_ch:
         if new_ch not in st.session_state.channel_list:
             st.session_state.channel_list.append(new_ch)
-            # 모든 10개 객실에 대해 config 초기값 강제 생성
+            # 채널 추가 시 10개 객실 초기 설정 강제 생성 (KeyError 방지)
             st.session_state.promotions[new_ch] = {
                 "selected_rooms": ALL_ROOMS.copy(),
                 "config": {rid: {"name": f"{new_ch}_{rid}", "discount_rate": 0, "add_price": 0} for rid in ALL_ROOMS}
@@ -220,8 +224,8 @@ with st.sidebar:
 
     for ch in st.session_state.channel_list:
         with st.expander(f"📦 {ch} 설정"):
-            # KeyError 방지를 위해 .get() 사용 및 초기값 보장
-            ch_data = st.session_state.promotions.get(ch, {})
+            # 안전하게 데이터 참조
+            ch_data = st.session_state.promotions.get(ch, {"selected_rooms": ALL_ROOMS, "config": {}})
             c_sel = ch_data.get("selected_rooms", ALL_ROOMS)
             
             new_sel = []
@@ -232,15 +236,15 @@ with st.sidebar:
             
             for rid in new_sel:
                 st.markdown(f"**{rid}**")
-                # config 및 name 키 존재 여부 확인 후 처리
+                # 개별 객실 설정이 없으면 자동 생성
                 if rid not in st.session_state.promotions[ch]["config"]:
                     st.session_state.promotions[ch]["config"][rid] = {"name": f"{ch}_{rid}", "discount_rate": 0, "add_price": 0}
                 
                 rid_cfg = st.session_state.promotions[ch]["config"][rid]
                 st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("명칭", value=rid_cfg.get('name', f"{ch}_{rid}"), key=f"n_{ch}_{rid}")
                 c1, c2 = st.columns(2)
-                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인(%)", value=rid_cfg.get('discount_rate', 0), key=f"d_{ch}_{rid}")
-                st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=rid_cfg.get('add_price', 0), step=1000, key=f"a_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인(%)", value=float(rid_cfg.get('discount_rate', 0)), key=f"d_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=int(rid_cfg.get('add_price', 0)), step=1000, key=f"a_{ch}_{rid}")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
@@ -253,14 +257,14 @@ with st.sidebar:
                 p_df = st.session_state.prev_df.copy()
                 p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat())
                 p_df_dict = p_df.to_dict(orient='records')
-            save_data = {
+            
+            db.collection("daily_snapshots").add({
                 "work_date": date.today().strftime("%Y-%m-%d"),
                 "save_time": datetime.now().isoformat(),
                 "data": t_df.to_dict(orient='records'),
                 "prev_data": p_df_dict
-            }
-            db.collection("daily_snapshots").add(save_data)
-            st.success("저장 완료")
+            })
+            st.success("데이터 저장 완료")
 
 # --- 7. 파일 로직 (파일명 숫자 기반 자동 비교) ---
 if files:
@@ -291,8 +295,10 @@ if files:
 
 # --- 8. 메인 화면 출력 ---
 if not st.session_state.today_df.empty:
-    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="📊 1. 시장 분석 (10개 객실 통합)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
-    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="🔔 3. 판도 변화 (유채색 원색 알림)", mode="판도변화"), unsafe_allow_html=True)
+    curr = st.session_state.today_df
+    prev = st.session_state.prev_df
+    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (10개 객실 통합)", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (BAR 유채색 알림)", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, ch_name=ch, title=f"✅ {ch} 판매가 산출 (유채색 연동)", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출 (유채색 연동)", mode="판매가"), unsafe_allow_html=True)
