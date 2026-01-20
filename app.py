@@ -18,7 +18,6 @@ db = firestore.client()
 # --- 2. 호텔 요금 및 규칙 설정 ---
 ROOM_CONFIG = {"FDB": {"total": 32}, "DBL": {"total": 20}}
 
-# 특수 기간 리스트 (성수기/연휴)
 SPECIAL_PERIODS = [
     {"start": "2026-02-13", "end": "2026-02-18", "base_bar": "BAR 4", "label": "성수기 연휴"},
     {"start": "2026-03-01", "end": "2026-03-01", "base_bar": "BAR 7", "label": "비수기 삼일절"},
@@ -31,19 +30,14 @@ SPECIAL_PERIODS = [
     {"start": "2026-12-21", "end": "2026-12-31", "base_bar": "BAR 5", "label": "연말 성수기"}
 ]
 
-# 요금표 (실제 금액으로 수정 필요)
 PRICE_TABLE = {
-    "BAR 1": {"WD": 300000, "WE": 350000},
-    "BAR 2": {"WD": 280000, "WE": 330000},
-    "BAR 3": {"WD": 260000, "WE": 310000},
-    "BAR 4": {"WD": 240000, "WE": 290000},
-    "BAR 5": {"WD": 220000, "WE": 270000},
-    "BAR 6": {"WD": 200000, "WE": 250000},
-    "BAR 7": {"WD": 180000, "WE": 230000},
-    "BAR 8": {"WD": 160000, "WE": 210000},
+    "BAR 1": {"WD": 300000, "WE": 350000}, "BAR 2": {"WD": 280000, "WE": 330000},
+    "BAR 3": {"WD": 260000, "WE": 310000}, "BAR 4": {"WD": 240000, "WE": 290000},
+    "BAR 5": {"WD": 220000, "WE": 270000}, "BAR 6": {"WD": 200000, "WE": 250000},
+    "BAR 7": {"WD": 180000, "WE": 230000}, "BAR 8": {"WD": 160000, "WE": 210000},
 }
 
-# --- 3. 핵심 로직 함수 ---
+# --- 3. 로직 함수 ---
 def get_bar_by_occ(occ):
     if occ >= 90: return "BAR 1"
     elif occ >= 80: return "BAR 2"
@@ -55,74 +49,78 @@ def get_bar_by_occ(occ):
     else: return "BAR 8"
 
 def determine_bar_and_price(date_obj, occ):
-    is_weekend = date_obj.weekday() in [4, 5] # 금(4), 토(5)
+    is_weekend = date_obj.weekday() in [4, 5] # 금토
     day_type = "WE" if is_weekend else "WD"
-    
-    # 1순위: 특수 기간 체크
     for period in SPECIAL_PERIODS:
         start = datetime.strptime(period["start"], "%Y-%m-%d").date()
         end = datetime.strptime(period["end"], "%Y-%m-%d").date()
         if start <= date_obj <= end:
-            if period["base_bar"] == "SUMMER":
-                final_bar = "BAR 4" if is_weekend else "BAR 5"
-            else:
-                final_bar = period["base_bar"]
+            final_bar = "BAR 4" if (period["base_bar"] == "SUMMER" and is_weekend) else ("BAR 5" if period["base_bar"] == "SUMMER" else period["base_bar"])
             return final_bar, PRICE_TABLE[final_bar][day_type], period["label"]
-            
-    # 2순위: 일반 점유율 체크
     final_bar = get_bar_by_occ(occ)
     return final_bar, PRICE_TABLE[final_bar][day_type], "일반"
 
 def apply_color(val):
     if pd.isna(val) or val == 0: return ""
-    # 금액별 고유 색상 생성 (해시 활용)
     color_hash = hashlib.md5(str(val).encode()).hexdigest()[:6]
     return f'background-color: #{color_hash}; color: black; font-weight: bold;'
 
 # --- 4. Streamlit UI ---
-st.set_page_config(layout="wide", page_title="Hotel Revenue Master")
-st.title("🏨 호텔 동적 요금 관리 & 히스토리 시스템")
+st.set_page_config(layout="wide")
+st.title("🏨 호텔 요금 관리 시스템 (월별 탭)")
 
+# 사이드바 설정
 with st.sidebar:
-    st.header("📍 메뉴")
-    mode = st.radio("작업 선택", ["요금 수정 (엑셀 업로드)", "과거 내역 조회"])
-    uploaded_file = st.file_uploader("재고 현황 파일(.xlsx)", type=['xlsx'])
+    mode = st.radio("모드 선택", ["요금 수정", "기록 조회"])
+    uploaded_file = st.file_uploader("엑셀 파일 업로드", type=['xlsx'])
 
-if mode == "요금 수정 (엑셀 업로드)" and uploaded_file:
-    # 데이터 로드 (날짜 컬럼이 'Date', 잔여객실이 'Available'이라고 가정)
-    df = pd.read_excel(uploaded_file)
-    df['Date'] = pd.to_datetime(df['Date']).dt.date
+# 1월부터 12월까지 탭 생성
+month_names = [f"{i}월" for i in range(1, 13)]
+tabs = st.tabs(month_names)
+
+if mode == "요금 수정" and uploaded_file:
+    full_df = pd.read_excel(uploaded_file)
+    full_df['Date'] = pd.to_datetime(full_df['Date']).dt.date
     
-    # 계산 적용
+    # 전체 데이터 계산
     results = []
-    for _, row in df.iterrows():
+    for _, row in full_df.iterrows():
         occ = ((ROOM_CONFIG["FDB"]["total"] - row['Available']) / ROOM_CONFIG["FDB"]["total"] * 100)
         bar, price, label = determine_bar_and_price(row['Date'], occ)
         results.append({"OCC": round(occ, 1), "BAR": bar, "Price": price, "Type": label})
     
-    res_df = pd.concat([df, pd.DataFrame(results)], axis=1)
-    
-    st.subheader("📊 오늘의 자동 요금 제안")
-    st.dataframe(res_df.style.applymap(apply_color, subset=['Price']))
-    
-    if st.button("💾 현재 대시보드 스냅샷 저장 (Firebase)"):
-        doc_id = datetime.now().strftime("%Y-%m-%d_%H%M")
-        db.collection("daily_snapshots").document(doc_id).set({
-            "work_date": datetime.now().strftime("%Y-%m-%d"),
-            "data": res_df.to_dict(orient='records')
-        })
-        st.success(f"{doc_id} 기록이 성공적으로 저장되었습니다.")
+    processed_df = pd.concat([full_df, pd.DataFrame(results)], axis=1)
 
-elif mode == "과거 내역 조회":
-    search_date = st.date_input("조회하고 싶은 날짜를 선택하세요")
+    # 각 탭에 월별 데이터 배분
+    for i, tab in enumerate(tabs):
+        with tab:
+            month_num = i + 1
+            # 해당 월의 데이터만 필터링
+            month_df = processed_df[processed_df['Date'].apply(lambda x: x.month == month_num)]
+            
+            if not month_df.empty:
+                st.subheader(f"📊 {month_num}월 요금 제안")
+                st.dataframe(month_df.style.applymap(apply_color, subset=['Price']), use_container_width=True)
+                
+                if st.button(f"{month_num}월 데이터 저장", key=f"save_{month_num}"):
+                    doc_id = datetime.now().strftime("%Y-%m-%d_%H%M")
+                    db.collection("daily_snapshots").document(doc_id).set({
+                        "work_date": datetime.now().strftime("%Y-%m-%d"),
+                        "target_month": month_num,
+                        "data": month_df.to_dict(orient='records')
+                    })
+                    st.success(f"{month_num}월 기록 저장 완료!")
+            else:
+                st.info(f"{month_num}월 데이터가 업로드된 파일에 없습니다.")
+
+elif mode == "기록 조회":
+    with st.sidebar:
+        search_date = st.date_input("조회 날짜")
+    
     docs = db.collection("daily_snapshots").where("work_date", "==", search_date.strftime("%Y-%m-%d")).stream()
     
-    found = False
     for doc in docs:
-        found = True
-        st.write(f"🕒 저장 시각: {doc.id}")
-        hist_df = pd.DataFrame(doc.to_dict()['data'])
-        st.dataframe(hist_df.style.applymap(apply_color, subset=['Price']))
-    
-    if not found:
-        st.warning("해당 날짜에 저장된 기록이 없습니다.")
+        d = doc.to_dict()
+        st.write(f"🕒 저장 시각: {doc.id} ({d['target_month']}월분)")
+        hist_df = pd.DataFrame(d['data'])
+        st.dataframe(hist_df.style.applymap(apply_color, subset=['Price']), use_container_width=True)
