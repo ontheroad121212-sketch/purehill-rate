@@ -5,7 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 
-# --- 1. 파이버베이스 초기화 ---
+# --- 1. 파이버베이스 초기화 (생략 금지) ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -15,7 +15,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 세팅 (절대 삭제 금지) ---
+# --- 2. 전역 설정 데이터 (무삭제) ---
 # 판도 변화 시 등급별 유채색 컬러 (빨/주/노/레/초/하/파/회)
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
@@ -26,7 +26,7 @@ DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
-# [유동 객실 5종] BAR별 요금표
+# [유동 객실] BAR별 요금표
 PRICE_TABLE = {
     "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
     "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
@@ -35,7 +35,7 @@ PRICE_TABLE = {
     "HDF": {"BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
 
-# [고정 객실 5종] 시즌/요일별 요금표 (UND1~UPP2)
+# [고정 객실] 시즌/요일별 요금표
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 180000, "UND2": 180000, "MID1": 225000, "MID2": 225000, "UPP1": 285000, "UPP2": 315000},
     "GDF": {"UND1": 375000, "UND2": 375000, "MID1": 410000, "MID2": 410000, "UPP1": 488000, "UPP2": 488000},
@@ -44,30 +44,21 @@ FIXED_PRICE_TABLE = {
     "PPV": {"UND1": 1100000, "UND2": 1100000, "MID1": 1250000, "MID2": 1250000, "UPP1": 1400000, "UPP2": 1400000},
 }
 
-# --- 3. 핵심 판별 로직 (시즌 및 바 체계 완전 동기화) ---
+# --- 3. 판별 로직 (시즌/BAR 완벽 동기화) ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
-    
-    holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", 
-                            "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
+    holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
     holiday_mid_weekends = ["03.01", "05.03", "05.04", "05.05", "06.05", "06.06", "06.07"]
-    
     upp_period_dates = ["10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08"]
     for i in range(21, 32): upp_period_dates.append(f"12.{i}")
 
     is_weekend = date_obj.weekday() in [4, 5]
-
-    if md in holiday_upp_weekends:
-        season, is_weekend = "UPP", True
-    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates):
-        season = "UPP"
-    elif md in holiday_mid_weekends:
-        season, is_weekend = "MID", True
-    elif (1 <= m <= 3) or (11 <= m <= 12):
-        season = "UND"
-    else:
-        season = "MID"
+    if md in holiday_upp_weekends: season, is_weekend = "UPP", True
+    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates): season = "UPP"
+    elif md in holiday_mid_weekends: season, is_weekend = "MID", True
+    elif (1 <= m <= 3) or (11 <= m <= 12): season = "UND"
+    else: season = "MID"
 
     type_code = f"{season}{'2' if is_weekend else '1'}"
     return season, is_weekend, type_code
@@ -118,9 +109,10 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 테이블 렌더러 (HTML) ---
+# --- 4. 메인 렌더러 (HTML) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     dates = sorted(current_df['Date'].unique())
+    # 판매가 모드일 때 채널별 선택된 객실 필터링
     if mode == "판매가":
         rooms_to_show = st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     else:
@@ -171,8 +163,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             elif mode == "판도변화":
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#7000FF")
-                    text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] or "BAR" not in str(bar) else "black"
-                    style += f"background-color: {bg}; color: {text_c}; font-weight: bold; border: 2.5px solid #000;"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
                 else: content = bar
             elif mode == "판매가":
@@ -182,15 +173,14 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{final_p:,}</b>"
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#7000FF")
-                    text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] or "BAR" not in str(bar) else "black"
-                    style += f"background-color: {bg}; color: {text_c}; font-weight: bold; border: 2.5px solid #333;"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
 
             html += f"<td style='{style}'>{content}</td>"
         html += "</tr>"
     html += "</tbody></table>"
     return html
 
-# --- 5. 사이드바 및 UI 상호작용 ---
+# --- 5. 사이드바 및 UI ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
@@ -210,38 +200,38 @@ with st.sidebar:
             st.success("로드 완료")
 
     st.divider()
-    st.header("🎯 채널 무제한 확장 설정")
-    new_ch = st.text_input("새 채널 명칭 (예: 아고다, 네이버)")
-    if st.button("➕ 채널 추가") and new_ch:
-        if new_ch not in st.session_state.channel_list:
-            st.session_state.channel_list.append(new_ch)
-            st.session_state.promotions[new_ch] = {
+    st.header("🎯 채널 관리")
+    new_ch_name = st.text_input("새 채널 명칭")
+    if st.button("➕ 채널 추가") and new_ch_name:
+        if new_ch_name not in st.session_state.channel_list:
+            st.session_state.channel_list.append(new_ch_name)
+            st.session_state.promotions[new_ch_name] = {
                 "selected_rooms": ALL_ROOMS.copy(),
-                "config": {rid: {"name": f"{new_ch}_{rid}", "discount_rate": 0, "add_price": 0} for rid in ALL_ROOMS}
+                "config": {rid: {"name": f"{new_ch_name}_{rid}", "discount_rate": 0, "add_price": 0} for rid in ALL_ROOMS}
             }
             st.rerun()
 
     for ch in st.session_state.channel_list:
-        with st.expander(f"📦 {ch} 채널 상세 설정"):
-            # 객실 선택
-            current_selected = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
-            new_selection = []
+        with st.expander(f"📦 {ch} 상세 설정"):
+            # 객실 선택 체크박스
+            current_rooms = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
+            updated_rooms = []
             for r in ALL_ROOMS:
-                if st.checkbox(f"{r} 노출", value=(r in current_selected), key=f"cb_{ch}_{r}"):
-                    new_selection.append(r)
-            st.session_state.promotions[ch]["selected_rooms"] = new_selection
+                if st.checkbox(r, value=(r in current_rooms), key=f"cb_{ch}_{r}"):
+                    updated_rooms.append(r)
+            st.session_state.promotions[ch]["selected_rooms"] = updated_rooms
             
-            # 타입별 설정
-            for rid in new_selection:
+            # 타입별 프로모션 설정
+            for rid in updated_rooms:
                 st.markdown(f"**{rid} 설정**")
                 st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("프로모션명", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
                 c1, c2 = st.columns(2)
-                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인율(%)", value=st.session_state.promotions[ch]["config"][rid]['discount_rate'], key=f"ds_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인(%)", value=st.session_state.promotions[ch]["config"][rid]['discount_rate'], key=f"ds_{ch}_{rid}")
                 st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=st.session_state.promotions[ch]["config"][rid]['add_price'], step=1000, key=f"ad_{ch}_{rid}")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
-    if st.button("🚀 스냅샷 저장"):
+    if st.button("🚀 오늘 스냅샷 저장"):
         if 'today_df' in st.session_state:
             save_df = st.session_state.today_df.copy()
             save_df['Date'] = save_df['Date'].apply(lambda x: x.isoformat())
@@ -252,7 +242,7 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 6. 파일 처리 및 자동 비교 로직 ---
+# --- 6. 파일 처리 ---
 if files:
     all_extracted = []
     for f in files:
@@ -276,27 +266,26 @@ if files:
         if len(unique_files) >= 2:
             st.session_state.today_df = full_df[full_df['FileRef'] == unique_files[-1]]
             st.session_state.prev_df = full_df[full_df['FileRef'] == unique_files[-2]]
-            st.info(f"비교 분석 중: {unique_files[-2]} (과거) vs {unique_files[-1]} (오늘)")
         else:
             st.session_state.today_df = full_df
-            st.session_state.prev_df = st.session_state.get('prev_df', pd.DataFrame())
 
-# --- 7. 메인 화면 출력 (4단계 통 구조) ---
+# --- 7. 메인 화면 출력 (무삭제) ---
 if 'today_df' in st.session_state:
+    curr = st.session_state.today_df
     prev = st.session_state.get('prev_df', pd.DataFrame())
     
-    # [Image of hotel revenue management table with color-coded rates and occupancy trends]
-    
+    [Image of hotel dynamic pricing table with seasonal alerts and channel rates]
+
     # 1. 시장 분석 (10개 객실 통합)
-    st.markdown(render_master_table(st.session_state.today_df, prev, title="📊 1. 시장 분석 (전체 10개 타입)", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (유동 5종 + 고정 5종)", mode="기준"), unsafe_allow_html=True)
     
-    # 2. 예약 변화량 (Pick-up)
-    st.markdown(render_master_table(st.session_state.today_df, prev, title="📈 2. 예약 변화량 (Pick-up 분석)", mode="변화"), unsafe_allow_html=True)
+    # 2. 예약 변화량 (Pick-up 분석)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
     
-    # 3. 판도 변화 (유채색 등급 알림)
-    st.markdown(render_master_table(st.session_state.today_df, prev, title="🔔 3. 판도 변화 (BAR 변경 알림)", mode="판도변화"), unsafe_allow_html=True)
+    # 3. 판도 변화 (유채색 원색 알림)
+    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (BAR 변경 시 유채색 강조)", mode="판도변화"), unsafe_allow_html=True)
     
     st.divider()
-    # 4. 채널별 커스텀 판매가 영역
+    # 4. 채널별 최종 판매가 (무제한 커스텀 영역)
     for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(st.session_state.today_df, prev, ch_name=ch, title=f"✅ {ch} 최종 판매가 산출 (판도 컬러 연동)", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 최종 판매가 (유채색 컬러 동기화)", mode="판매가"), unsafe_allow_html=True)
