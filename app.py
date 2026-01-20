@@ -31,7 +31,7 @@ PRICE_TABLE = {
 ROOM_MAPPING = {
     "포레스트 가든 더블": "FDB",
     "포레스트 가든 EB": "FDE",
-    "힐 파인 더블: "HDP",
+    "힐 파인 더블": "HDP",
     "힐 엠버 트윈": "HDT",
     "힐 루나 패밀리": "HDF"
 }
