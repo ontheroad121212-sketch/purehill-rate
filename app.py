@@ -5,7 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 
-# --- 1. 파이어베이스 및 상태 초기화 ---
+# --- 1. 파이어베이스 초기화 ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -15,8 +15,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 데이터 ---
-# BAR 등급별 고유 색상 (동일 BAR는 동일 색상)
+# --- 2. 전역 설정 데이터 (NameError 방지 위해 상단 배치) ---
 BAR_STYLE = {
     "BAR1": {"bg": "#FF4B4B", "text": "white"}, 
     "BAR2": {"bg": "#FF7E7E", "text": "white"}, 
@@ -45,7 +44,6 @@ PRICE_TABLE = {
 if 'all_data_df' not in st.session_state:
     st.session_state.all_data_df = pd.DataFrame()
 
-# ⭐ 사이드바 커스텀 셋팅을 저장할 상태값 (핵심)
 if 'promotions' not in st.session_state:
     st.session_state.promotions = {
         "네이버": {rid: {"name": f"네이버_{rid}_패키지", "discount_rate": 0, "add_price": 0} for rid in ROOM_IDS}
@@ -53,7 +51,6 @@ if 'promotions' not in st.session_state:
 
 # --- 3. 핵심 로직 함수 ---
 def calculate_final_price(base_price, discount_rate, add_price):
-    """(기준가 * 할인율) -> 1000원 단위 절삭 -> 추가금액"""
     after_discount = base_price * (1 - (discount_rate / 100))
     floored = math.floor(after_discount / 1000) * 1000
     return int(floored + add_price)
@@ -74,8 +71,12 @@ def determine_values(room_id, date_obj, avail, total):
 def get_last_snapshot():
     try:
         docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
-        for doc in docs: return pd.DataFrame(doc.to_dict()['data'])
-    except: return pd.DataFrame()
+        for doc in docs:
+            df = pd.DataFrame(doc.to_dict()['data'])
+            df['Date'] = pd.to_datetime(df['Date']).dt.date
+            return df
+    except:
+        return pd.DataFrame()
     return pd.DataFrame()
 
 # --- 4. 4단계 통 구조 HTML 렌더러 ---
@@ -90,7 +91,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tr><tr style='background:#f9f9f9;'>"
     for d in dates:
         wd = WEEKDAYS_KR[d.weekday()]
-        html += f"<th style='border:1px solid #ddd; padding:5px;' class='{'sun' if wd=='일' else ('sat' if wd=='토' else '')}'>{wd}</th>"
+        cls = "sun" if wd == '일' else ("sat" if wd == '토' else "")
+        html += f"<th style='border:1px solid #ddd; padding:5px;' class='{cls}'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
     for rid in ROOM_IDS:
@@ -118,7 +120,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             elif mode == "변화":
                 pickup = 0
                 if not prev_df.empty:
-                    prev_match = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
+                    prev_match = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                     if not prev_match.empty: pickup = prev_match.iloc[0]['Available'] - curr_row['Available']
                 if pickup > 0:
                     style += "background-color: #FFEBEE; color: #D32F2F; font-weight: bold;"
@@ -127,7 +129,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             elif mode == "판도변화":
                 prev_bar = None
                 if not prev_df.empty:
-                    prev_m = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
+                    prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                     if not prev_m.empty: _, prev_bar, _ = determine_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
                 if prev_bar and prev_bar != bar:
                     style += ALERT_STYLE
@@ -146,13 +148,13 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table>"
     return html
 
-# --- 5. UI 및 메인 로직 ---
+# --- 5. UI 및 실행 ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략적 판도 분석 RMS")
 
-# ⭐ 사이드바: 커스텀 셋팅 영역 (생략 없음)
+# 사이드바 설정 영역
 with st.sidebar:
-    st.header("🎯 채널별 프로모션 빌더")
+    st.header("🎯 프로모션 커스텀 빌더")
     new_ch = st.text_input("새 채널 이름")
     if st.button("➕ 채널 추가"):
         if new_ch and new_ch not in st.session_state.promotions:
@@ -161,7 +163,7 @@ with st.sidebar:
 
     st.divider()
     for ch, configs in st.session_state.promotions.items():
-        with st.expander(f"📦 {ch} 채널 상세 설정", expanded=False):
+        with st.expander(f"📦 {ch} 채널 상세 설정"):
             for rid in ROOM_IDS:
                 st.markdown(f"**[{rid}] 설정**")
                 configs[rid]['name'] = st.text_input(f"프로모션명", value=configs[rid]['name'], key=f"{ch}_{rid}_n")
@@ -171,12 +173,19 @@ with st.sidebar:
                 st.divider()
 
     uploaded_files = st.file_uploader("엑셀 리포트 업로드", accept_multiple_files=True)
+    
+    # ⭐ 파이어베이스 저장 에러 수정 포인트
     if st.button("🚀 스냅샷 저장 (기준점)"):
         if not st.session_state.all_data_df.empty:
-            db.collection("daily_snapshots").add({"save_time": datetime.now(), "data": st.session_state.all_data_df.to_dict(orient='records')})
-            st.success("오늘 데이터 저장 완료! 내일 비교 기준이 됩니다.")
+            save_df = st.session_state.all_data_df.copy()
+            save_df['Date'] = save_df['Date'].apply(lambda x: x.isoformat()) # 날짜를 문자열로 변환
+            db.collection("daily_snapshots").add({
+                "save_time": datetime.now(),
+                "data": save_df.to_dict(orient='records')
+            })
+            st.success("저장 완료! 이제 내일 데이터와 비교 가능합니다.")
 
-# 파일 로드 로직
+# 파일 처리
 if uploaded_files:
     all_temp = []
     for f in uploaded_files:
@@ -188,22 +197,29 @@ if uploaded_files:
             for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                 if pd.isna(d_val) or pd.isna(av): continue
                 try:
-                    d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date().replace(year=2026) if isinstance(d_val, (int, float)) else datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
+                    if isinstance(d_val, (int, float)):
+                        d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date()
+                    else:
+                        d_obj = datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
                     all_temp.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
                 except: continue
-    st.session_state.all_data_df = pd.DataFrame(all_temp)
+    st.session_state.all_data_df = pd.DataFrame(all_temp).drop_duplicates(subset=['Date', 'RoomID'], keep='last')
 
-# 메인 화면 출력 (4단계 통 구조)
+# 메인 분석 대시보드
 if not st.session_state.all_data_df.empty:
     last_data = get_last_snapshot()
     curr_data = st.session_state.all_data_df
     
+    # 1. 기준 분석 (오늘자 데이터)
     st.markdown(render_master_table(curr_data, last_data, title="📊 1. 시장 분석 (오늘의 추천 BAR / 점유율)", mode="기준"), unsafe_allow_html=True)
+    
+    # 2. 예약 변화 분석 (Pick-up)
     st.markdown(render_master_table(curr_data, last_data, title="📈 2. 예약 변화량 (전일 대비 Pick-up)", mode="변화"), unsafe_allow_html=True)
     
-    # ⭐ 판도 변화 통: BAR가 변하면 보라색 강조, 동일 BAR는 동일 색상
+    # 3. 판도 변화 분석 (BAR 등급 변경 시 보라색 알림)
     st.markdown(render_master_table(curr_data, last_data, title="🔔 3. 판도 변화 (BAR 등급 변경 알림)", mode="판도변화"), unsafe_allow_html=True)
     
+    # 4. 채널별 최종 판매가 산출
     st.header("📲 4. 채널별 최종 판매가 통")
     for ch_name in st.session_state.promotions.keys():
-        st.markdown(render_master_table(curr_data, last_data, ch_name=ch_name, title=f"✅ {ch_name} 판매가 (커스텀 수식 반영)", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr_data, last_data, ch_name=ch_name, title=f"✅ {ch_name} 판매가 통", mode="판매가"), unsafe_allow_html=True)
