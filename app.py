@@ -29,11 +29,11 @@ PRICE_TABLE = {
 
 # 엑셀 A열의 텍스트와 위 ID 매칭 (엑셀에 적힌 이름과 똑같이 맞춰주세요)
 ROOM_MAPPING = {
-    "포레스트 가든 더블": "FDB",
-    "포레스트 가든 EB": "FDE",
-    "힐 파인 더블": "HDP",
-    "힐 엠버 트윈": "HDT",
-    "힐 루나 패밀리": "HDF"
+    "FDB": "FDB",
+    "FDE": "FDE",
+    "HDP": "HDP",
+    "HDT": "HDT",
+    "HDF": "HDF"
 }
 
 # 객실별 전체 재고량
