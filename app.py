@@ -15,7 +15,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 및 데이터 세팅 (절대 삭제 금지) ---
+# --- 2. 전역 설정 및 데이터 (절대 삭제 금지) ---
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", "BAR2": "#FF8C00", "BAR3": "#FFD166", "BAR4": "#DAF7A6",
     "BAR5": "#2ECC71", "BAR6": "#3498DB", "BAR7": "#0000FF", "BAR8": "#BDC3C7",
@@ -47,61 +47,51 @@ FIXED_PRICE_TABLE = {
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
-    
-    # 성수기 주말 강제 (명절)
     holiday_upp_weekends = ["02.13", "02.14", "02.15", "02.16", "02.17", "02.18", "09.23", "09.24", "09.25", "09.26", "09.27", "09.28"]
-    # 평수기 주말 강제 (연휴)
     holiday_mid_weekends = ["03.01", "05.03", "05.04", "05.05", "06.05", "06.06", "06.07"]
-    # 성수기 기간 (여름 + 12월 21~31일)
     upp_period_dates = ["10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08"]
     for i in range(21, 32): upp_period_dates.append(f"12.{i}")
 
-    is_weekend = date_obj.weekday() in [4, 5] # 금,토
-
-    if md in holiday_upp_weekends:
-        season, is_weekend = "UPP", True
-    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates):
-        season = "UPP"
-    elif md in holiday_mid_weekends:
-        season, is_weekend = "MID", True
-    elif (1 <= m <= 3) or (11 <= m <= 12):
-        season = "UND"
-    else:
-        season = "MID"
+    is_weekend = date_obj.weekday() in [4, 5] # 금,토 기본
+    if md in holiday_upp_weekends: season, is_weekend = "UPP", True
+    elif ("07.17" <= md <= "08.29") or (md in upp_period_dates): season = "UPP"
+    elif md in holiday_mid_weekends: season, is_weekend = "MID", True
+    elif (1 <= m <= 3) or (11 <= m <= 12): season = "UND"
+    else: season = "MID"
 
     type_code = f"{season}{'2' if is_weekend else '1'}"
     return season, is_weekend, type_code
 
 def determine_bar(season, is_weekend, occ):
     if season == "UPP":
-        if is_weekend: # BAR 4 ~ BAR 1
+        if is_weekend:
             if occ >= 81: return "BAR1"
             elif occ >= 51: return "BAR2"
             elif occ >= 31: return "BAR3"
             else: return "BAR4"
-        else: # BAR 5 ~ BAR 2
+        else:
             if occ >= 81: return "BAR2"
             elif occ >= 51: return "BAR3"
             elif occ >= 31: return "BAR4"
             else: return "BAR5"
     elif season == "MID":
-        if is_weekend: # BAR 6 ~ BAR 3
+        if is_weekend:
             if occ >= 81: return "BAR3"
             elif occ >= 51: return "BAR4"
             elif occ >= 31: return "BAR5"
             else: return "BAR6"
-        else: # BAR 7 ~ BAR 4
+        else:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
     else: # UND
-        if is_weekend: # BAR 7 ~ BAR 4
+        if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-        else: # BAR 8 ~ BAR 5
+        else:
             if occ >= 81: return "BAR5"
             elif occ >= 51: return "BAR6"
             elif occ >= 31: return "BAR7"
@@ -118,7 +108,7 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 데이터 로드 함수 ---
+# --- 4. 데이터 로드 및 렌더러 ---
 def get_snapshot_by_date(selected_date):
     date_str = selected_date.strftime("%Y-%m-%d")
     docs = db.collection("daily_snapshots").where("work_date", "==", date_str).limit(1).stream()
@@ -128,13 +118,10 @@ def get_snapshot_by_date(selected_date):
         return df
     return pd.DataFrame()
 
-# --- 5. 테이블 렌더러 (HTML) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     dates = sorted(current_df['Date'].unique())
-    if mode == "판매가":
-        rooms_to_show = st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
-    else:
-        rooms_to_show = ALL_ROOMS
+    # 채널별 선택된 객실 설정 참조
+    rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions[ch_name].get("selected_rooms", ALL_ROOMS)
     
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<table style='width:100%; border-collapse:collapse; font-size:11px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:150px;'>객실/프로모션</th>"
@@ -161,10 +148,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             style = "border:1px solid #ddd; padding:8px; text-align:center; background-color:white;"
-            content = "-"
-
-            prev_bar = None
-            prev_avail = None
+            
+            prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
                 if not prev_m.empty:
@@ -176,16 +161,13 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 content = f"<b>{bar}</b><br>{occ:.0f}%"
             elif mode == "변화":
-                if prev_avail is not None:
-                    pickup = prev_avail - avail
-                    content = f"+{pickup}" if pickup > 0 else (pickup if pickup < 0 else "-")
-                    if pickup > 0: style += "color:red; font-weight:bold; background:#FFEBEE;"
-                else: content = "-"
+                pickup = (prev_avail - avail) if prev_avail is not None else 0
+                content = f"+{pickup}" if pickup > 0 else (pickup if pickup < 0 else "-")
+                if pickup > 0: style += "color:red; font-weight:bold; background:#FFEBEE;"
             elif mode == "판도변화":
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#7000FF")
-                    text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] or "BAR" not in str(bar) else "black"
-                    style += f"background-color: {bg}; color: {text_c}; font-weight: bold; border: 2.5px solid #000;"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
                 else: content = bar
             elif mode == "판매가":
@@ -195,15 +177,14 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{final_p:,}</b>"
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#7000FF")
-                    text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] or "BAR" not in str(bar) else "black"
-                    style += f"background-color: {bg}; color: {text_c}; font-weight: bold; border: 2.5px solid #333;"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
 
             html += f"<td style='{style}'>{content}</td>"
         html += "</tr>"
     html += "</tbody></table>"
     return html
 
-# --- 6. UI 및 사이드바 로직 ---
+# --- 5. UI 및 사이드바 ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
@@ -212,7 +193,7 @@ if 'channel_list' not in st.session_state: st.session_state.channel_list = []
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 
 with st.sidebar:
-    st.header("📅 과거 데이터 로드/저장")
+    st.header("📅 데이터 로드/저장")
     comp_date = st.date_input("비교할 과거 날짜 선택", value=date.today())
     if st.button("📂 DB 데이터 불러오기"):
         st.session_state.prev_df = get_snapshot_by_date(comp_date)
@@ -220,7 +201,7 @@ with st.sidebar:
         else: st.warning("데이터가 없습니다.")
 
     st.divider()
-    st.header("🎯 채널 관리 (무제한)")
+    st.header("🎯 채널 관리")
     new_ch = st.text_input("새 채널 명칭")
     if st.button("➕ 채널 추가") and new_ch:
         if new_ch not in st.session_state.channel_list:
@@ -233,20 +214,17 @@ with st.sidebar:
 
     for ch in st.session_state.channel_list:
         with st.expander(f"📦 {ch} 상세 설정"):
-            # 객실 선택 체크박스 (KeyError 방지)
             curr_rooms = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
             updated_rooms = []
             for r in ALL_ROOMS:
                 if st.checkbox(r, value=(r in curr_rooms), key=f"cb_{ch}_{r}"):
                     updated_rooms.append(r)
             st.session_state.promotions[ch]["selected_rooms"] = updated_rooms
-            
-            # 타입별 설정
             for rid in updated_rooms:
                 st.markdown(f"**{rid} 설정**")
-                st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("프로모션명", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['name'] = st.text_input("명칭", st.session_state.promotions[ch]["config"][rid]['name'], key=f"nm_{ch}_{rid}")
                 c1, c2 = st.columns(2)
-                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인(%)", value=st.session_state.promotions[ch]["config"][rid]['discount_rate'], key=f"ds_{ch}_{rid}")
+                st.session_state.promotions[ch]["config"][rid]['discount_rate'] = c1.number_input("할인율(%)", value=st.session_state.promotions[ch]["config"][rid]['discount_rate'], key=f"ds_{ch}_{rid}")
                 st.session_state.promotions[ch]["config"][rid]['add_price'] = c2.number_input("추가금", value=st.session_state.promotions[ch]["config"][rid]['add_price'], step=1000, key=f"ad_{ch}_{rid}")
 
     st.divider()
@@ -262,7 +240,7 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 7. 파일 분석 로직 ---
+# --- 6. 파일 처리 ---
 if files:
     all_data = []
     for f in files:
@@ -279,32 +257,20 @@ if files:
                     file_data.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot, "Ref": f.name})
                 except: continue
         all_data.append(pd.DataFrame(file_data))
-
+    
     if all_data:
         full_df = pd.concat(all_data)
         unique_refs = sorted(full_df['Ref'].unique())
-        # 파일이 2개 이상이면 자동 전후 비교
         if len(unique_refs) >= 2:
             st.session_state.today_df = full_df[full_df['Ref'] == unique_refs[-1]]
             st.session_state.prev_df = full_df[full_df['Ref'] == unique_refs[-2]]
         else:
             st.session_state.today_df = full_df
 
-# --- 8. 메인 화면 렌더링 ---
+# --- 7. 화면 출력 ---
 if 'today_df' in st.session_state:
-    curr = st.session_state.today_df
-    prev = st.session_state.prev_df
-    
-    # 1. 시장 분석
-    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (유동 5종 + 고정 5종 통합)", mode="기준"), unsafe_allow_html=True)
-    
-    # 2. 예약 변화 분석
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up 분석)", mode="변화"), unsafe_allow_html=True)
-    
-    # 3. 판도 변화 분석
-    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (BAR 변경 유채색 알림)", mode="판도변화"), unsafe_allow_html=True)
-    
-    st.divider()
-    # 4. 채널별 커스텀 요금표
+    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="📊 1. 시장 분석 (10개 객실 통합)", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, title="🔔 3. 판도 변화 (BAR 유채색 알림)", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출 (유채색 컬러 동기화)", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(st.session_state.today_df, st.session_state.prev_df, ch_name=ch, title=f"✅ {ch} 판매가 산출 (유채색 컬러 동기화)", mode="판매가"), unsafe_allow_html=True)
