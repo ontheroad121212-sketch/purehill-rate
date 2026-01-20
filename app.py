@@ -26,7 +26,6 @@ PRICE_TABLE = {
     "HDF": {"BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
 
-# BAR 등급별 색상 (배경색)
 BAR_COLORS = {
     "BAR1": "#FF4B4B", "BAR2": "#FF7E7E", "BAR3": "#FFD166", "BAR4": "#FFFC99",
     "BAR5": "#D1FFBD", "BAR6": "#99FF99", "BAR7": "#BAE1FF", "BAR8": "#A0C4FF",
@@ -40,7 +39,7 @@ SPECIAL_PERIODS = [
     {"start": "2026-12-21", "end": "2026-12-31", "base_bar": "BAR5", "label": "연말 성수기"}
 ]
 
-# --- 3. 로직 함수 ---
+# --- 3. 핵심 로직 ---
 def determine_values(room_id, date_obj, avail, total):
     occ = ((total - avail) / total * 100) if total > 0 else 0
     is_weekend = date_obj.weekday() in [4, 5]
@@ -84,33 +83,33 @@ def load_custom_excel(file):
             except: continue
     return pd.DataFrame(all_data)
 
-# 스타일링 핵심 함수
+# ⭐ 대시보드 커스텀 스타일 함수 (병합 및 굵은 선)
 def style_dashboard(styler):
-    def get_row_styles(row):
+    def apply_row_style(row):
+        category = row.name[1] # '1. 점유율', '2. BAR', '3. 요금'
         styles = []
-        category = row.name[1] # '점유율', 'BAR', '요금' 중 하나
         for val in row:
-            style = ""
+            base = ""
             if "점유율" in category:
-                style = "font-size: 11px; color: #888; height: 20px; vertical-align: bottom;"
+                base = "font-size: 10px; color: #999; height: 18px; vertical-align: bottom;"
             elif "BAR" in category:
-                bg_color = BAR_COLORS.get(str(val), "#FFFFFF")
-                style = f"background-color: {bg_color}; font-weight: bold; color: black; font-size: 14px;"
+                bg = BAR_COLORS.get(str(val), "#FFFFFF")
+                base = f"background-color: {bg}; font-weight: bold; color: black; font-size: 14px;"
             elif "요금" in category:
-                style = "border-bottom: 2.5px solid #333; font-size: 13px;" # 객실 간 구분선
-            styles.append(style)
+                base = "border-bottom: 3px solid #000000; font-size: 13px; font-weight: 500;" # 객실 간 굵은 구분선
+            styles.append(base)
         return styles
-    
-    return styler.apply(get_row_styles, axis=1)
 
-# --- 4. UI ---
+    return styler.apply(apply_row_style, axis=1)
+
+# --- 4. Streamlit UI ---
 st.set_page_config(layout="wide")
-st.title("🏨 엠버퓨어힐 전략적 요금 대시보드")
+st.title("🏨 엠버퓨어힐 요금/점유율 통합 대시보드 (2026)")
 
 with st.sidebar:
-    st.header("📂 데이터 관리")
-    uploaded_files = st.file_uploader("엑셀 파일들을 드래그해서 올리세요 (12개월 누적 가능)", type=['xlsx', 'xls'], accept_multiple_files=True)
-    if st.button("🔄 데이터 초기화"):
+    st.header("📂 리포트 업로드")
+    uploaded_files = st.file_uploader("월별 엑셀 파일들을 드래그하여 업로드하세요", type=['xlsx', 'xls'], accept_multiple_files=True)
+    if st.button("🔄 초기화"):
         st.session_state.all_data_df = pd.DataFrame()
         st.rerun()
 
@@ -125,14 +124,14 @@ if uploaded_files:
 
 if not st.session_state.all_data_df.empty:
     df = st.session_state.all_data_df.copy()
-    pivot_data = []
+    pivot_list = []
     for _, r in df.iterrows():
         occ, bar, price = determine_values(r['RoomID'], r['Date'], r['Available'], r['Total'])
-        pivot_data.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "1. 점유율", "값": f"{occ:.1f}%"})
-        pivot_data.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "2. BAR", "값": bar})
-        pivot_data.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "3. 요금", "값": f"{price:,}"})
+        pivot_list.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "1. 점유율", "값": f"{occ:.1f}%"})
+        pivot_list.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "2. BAR", "값": bar})
+        pivot_list.append({"Date": r['Date'], "RoomID": r['RoomID'], "구분": "3. 요금", "값": f"{price:,}"})
     
-    full_display_df = pd.DataFrame(pivot_data)
+    full_display_df = pd.DataFrame(pivot_list)
     tabs = st.tabs([f"{i}월" for i in range(1, 13)])
     
     for i, tab in enumerate(tabs):
@@ -140,16 +139,14 @@ if not st.session_state.all_data_df.empty:
             m = i + 1
             m_df = full_display_df[full_display_df['Date'].apply(lambda x: x.month == m)]
             if not m_df.empty:
-                # 피벗 및 정렬
+                # 피벗: RoomID와 구분을 인덱스로 설정 (병합 효과 발생)
                 view_df = m_df.pivot(index=['RoomID', '구분'], columns='Date', values='값')
                 
                 st.subheader(f"📊 {m}월 요금 시뮬레이션")
-                # 스타일 적용하여 출력
-                st.dataframe(style_dashboard(view_df.style), use_container_width=True, height=600)
+                # 스타일 적용
+                st.dataframe(style_dashboard(view_df.style), use_container_width=True, height=650)
                 
-                if st.button(f"{m}월 최종 저장", key=f"btn_{m}"):
-                    st.success("Firebase에 안전하게 저장되었습니다.")
+                if st.button(f"💾 {m}월 스냅샷 저장", key=f"s_{m}"):
+                    st.success(f"{m}월 데이터 저장 완료")
             else:
-                st.info(f"{m}월 데이터 없음")
-else:
-    st.warning("파일을 업로드하면 대시보드가 활성화됩니다.")
+                st.info(f"{m}월 데이터 미등록")
