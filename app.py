@@ -5,7 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 
-# --- 1. 파이어베이스 초기화 ---
+# --- 1. 파이버베이스 초기화 ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -16,7 +16,7 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # --- 2. 전역 설정 (유채색 판도 컬러) ---
-# 요청하신 대로 등급별로 아예 다른 색상 에어리어를 할당
+# 변화가 생겼을 때 결과 BAR 등급에 따라 아예 다른 색상 할당
 ALERT_BAR_COLORS = {
     "BAR1": "#FF0000", # 빨강
     "BAR2": "#FF8C00", # 주황
@@ -40,9 +40,9 @@ PRICE_TABLE = {
 }
 
 if 'promotions' not in st.session_state:
-    st.session_state.promotions = {"네이버": {rid: {"name": f"네이버_{rid}", "discount_rate": 0, "add_price": 0} for rid in ROOM_IDS}}
+    st.session_state.promotions = {"네이버": {rid: {"name": f"네이버_{rid}_패키지", "discount_rate": 0, "add_price": 0} for rid in ROOM_IDS}}
 
-# --- 3. 핵심 로직 ---
+# --- 3. 로직 함수 ---
 def calculate_final_price(base_price, discount_rate, add_price):
     after_discount = base_price * (1 - (discount_rate / 100))
     floored = math.floor(after_discount / 1000) * 1000
@@ -61,7 +61,6 @@ def determine_values(room_id, date_obj, avail, total):
     price = PRICE_TABLE.get(room_id, {}).get(final_bar, 0)
     return occ, final_bar, price
 
-# 선택한 날짜의 데이터 가져오기 (DB 호출)
 def get_snapshot_by_date(selected_date):
     date_str = selected_date.strftime("%Y-%m-%d")
     docs = db.collection("daily_snapshots").where("work_date", "==", date_str).limit(1).stream()
@@ -98,7 +97,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             style = "border:1px solid #ddd; padding:8px; text-align:center; background-color:white;"
             content = "-"
 
-            # 어제(또는 선택한 날짜) 데이터와 비교
             prev_bar = None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (pd.to_datetime(prev_df['Date']).dt.date == d)]
@@ -116,7 +114,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"+{pickup}" if pickup > 0 else (pickup if pickup < 0 else "-")
                 if pickup > 0: style += "color:red; font-weight:bold; background:#FFEBEE;"
             elif mode == "판도변화":
-                # ⭐ 요청사항: 등급별 원색 컬러링 (변화 시에만)
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#000")
                     text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] else "black"
@@ -127,7 +124,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 conf = st.session_state.promotions[ch_name][rid]
                 final_p = calculate_final_price(base_price, conf['discount_rate'], conf['add_price'])
                 content = f"<b>{final_p:,}</b>"
-                # ⭐ 판매가 영역에도 동일한 원색 컬러 연동
                 if is_changed:
                     bg = ALERT_BAR_COLORS.get(bar, "#000")
                     text_c = "white" if bar in ["BAR1", "BAR2", "BAR5", "BAR6", "BAR7"] else "black"
@@ -143,66 +139,62 @@ st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략적 판도 변화 추적 RMS")
 
 with st.sidebar:
-    st.header("📅 데이터 불러오기/저장")
-    # ⭐ 언제든지 날짜를 선택해서 과거 데이터 호출
+    st.header("📅 과거 데이터 불러오기")
     compare_date = st.date_input("비교할 과거 날짜 선택", value=datetime.now())
-    if st.button("📂 해당 날짜 데이터 불러오기"):
+    if st.button("📂 데이터 로드"):
         st.session_state.prev_df = get_snapshot_by_date(compare_date)
-        if not st.session_state.prev_df.empty: st.success(f"{compare_date} 데이터 로드 완료!")
-        else: st.warning("해당 날짜에 저장된 데이터가 없습니다.")
+        if not st.session_state.prev_df.empty: st.success(f"{compare_date} 로드 완료!")
+        else: st.warning("데이터가 없습니다.")
 
     st.divider()
-    st.header("🎯 채널 설정")
-    # ... (기존 채널 설정 로직 생략 없이 유지)
+    st.header("🎯 채널별 프로모션 설정")
     for ch, configs in st.session_state.promotions.items():
-        with st.expander(f"📦 {ch} 채널 설정"):
+        with st.expander(f"📦 {ch} 설정"):
             for rid in ROOM_IDS:
-                configs[rid]['name'] = st.text_input(f"{rid} 프로모션명", value=configs[rid]['name'], key=f"{ch}_{rid}_n")
+                st.markdown(f"**{rid}**")
+                configs[rid]['name'] = st.text_input("프로모션명", configs[rid]['name'], key=f"{ch}_{rid}_n")
                 c1, c2 = st.columns(2)
                 configs[rid]['discount_rate'] = c1.number_input("할인(%)", value=configs[rid]['discount_rate'], key=f"{ch}_{rid}_d")
-                configs[rid]['add_price'] = c2.number_input("추가금", value=configs[rid]['add_price'], step=1000, key=f"{ch}_{rid}_a")
+                configs[rid]['add_price'] = c2.number_input("추가금", value=configs[rid]['add_price'], key=f"{ch}_{rid}_a")
 
-    uploaded_files = st.file_uploader("오늘자 리포트 업로드", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("엑셀 리포트 업로드", accept_multiple_files=True)
     if st.button("🚀 오늘 데이터 스냅샷 저장"):
         if 'today_df' in st.session_state:
             save_df = st.session_state.today_df.copy()
             save_df['Date'] = save_df['Date'].apply(lambda x: x.isoformat())
             db.collection("daily_snapshots").add({
-                "work_date": datetime.now().strftime("%Y-%m-%d"), # 조회용 날짜
+                "work_date": datetime.now().strftime("%Y-%m-%d"),
                 "save_time": datetime.now(),
                 "data": save_df.to_dict(orient='records')
             })
             st.success("저장 완료!")
 
-# 파일 로드 로직
+# 데이터 로드 로직 (Syntax Error 수정됨)
 if uploaded_files:
     all_temp = []
     for f in uploaded_files:
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
-        data = []
         for r_idx in [6, 7, 10, 11, 12]:
             rid = str(df_raw.iloc[r_idx, 0]).strip().upper()
             tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
             for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
-                if pd.isna(d_val) or pd.isna(av): try: continue
-                except: continue
+                if pd.isna(d_val) or pd.isna(av):
+                    continue
                 try:
                     d_obj = (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date() if isinstance(d_val, (int, float)) else datetime.strptime(f"2026-{d_val}", "%Y-%m-%d").date()
-                    data.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
-                except: continue
-    st.session_state.today_df = pd.DataFrame(all_temp := data)
+                    all_temp.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot})
+                except:
+                    continue
+    st.session_state.today_df = pd.DataFrame(all_temp)
 
-# 화면 출력
 if 'today_df' in st.session_state:
-    curr = pd.DataFrame(all_temp)
+    curr = st.session_state.today_df
     prev = st.session_state.get('prev_df', pd.DataFrame())
     
-    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (추천 BAR)", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (기준 BAR)", mode="기준"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (Pick-up)", mode="변화"), unsafe_allow_html=True)
-    # ⭐ 판도 변화: 빨노초파 등 등급별 원색 컬러링
-    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (등급별 유채색 알림)", mode="판도변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화 (유채색 등급 알림)", mode="판도변화"), unsafe_allow_html=True)
     
-    st.header("📲 4. 채널별 최종 판매가 산출 (컬러 연동)")
     for ch in st.session_state.promotions.keys():
-        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가", mode="판매가"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 (컬러 연동)", mode="판매가"), unsafe_allow_html=True)
