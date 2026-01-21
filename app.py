@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 데이터 ---
+# --- 2. 전역 설정 (컬러 및 객실 정의) ---
 BAR_GRADIENT_COLORS = {
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
@@ -30,6 +30,7 @@ DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
+# [요금표]
 PRICE_TABLE = {
     "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
     "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
@@ -88,7 +89,7 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else: # UND
+    else:
         if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
@@ -111,9 +112,9 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 ---
+# --- 4. 렌더러 (채도 적용 및 가로 스크롤) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
-    if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
+    if current_df.empty: return "<div style='padding:20px;'>리포트를 업로드하거나 데이터를 로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     
@@ -145,6 +146,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             
             style = "border:1px solid #ddd; padding:8px; text-align:center; background-color:white;"
+            
+            # [수정] prev_bar 계산 로직 확실하게 복구
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
@@ -152,32 +155,43 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     prev_avail = prev_m.iloc[0]['Available']
                     _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
 
+            # 1. 기준 통: 배경색 그라데이션
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
                 content = f"<b>{bar}</b><br>{occ:.0f}%"
+            
+            # 2. 변화량 통: 예약 변화 수치 표시 (0이 아니면 표시)
             elif mode == "변화":
                 pickup = (prev_avail - avail) if prev_avail is not None else 0
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
+                
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
                     content = f"+{pickup}"
                 elif pickup < 0:
                     style += "color:blue; font-weight:bold;"
                     content = f"{pickup}"
-                else: content = "-"
+                else:
+                    content = "-"
+            
+            # 3. 판도 변화: BAR 등급 변경 시 원색 표시
             elif mode == "판도변화":
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
                 else: content = bar
+            
+            # 4. 판매가 통: BAR 변경 시 배경색 연동 [수정됨]
             elif mode == "판매가":
                 conf = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
                 after_disc = base_price * (1 - (conf.get('discount_rate', 0) / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + conf.get('add_price', 0))
                 content = f"<b>{final_p:,}</b>"
+                
+                # BAR가 변경되었다면 배경색을 칠함 (유채색 연동)
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
@@ -187,7 +201,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table></div>"
     return html
 
-# --- 5. 파서 및 DB 로직 (자동 최신 호출 추가) ---
+# --- 5. 파서 및 DB 로직 (자동 최신 불러오기) ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
     try:
@@ -212,14 +226,14 @@ def load_channel_configs():
         st.session_state.promotions = {}
 
 def get_latest_snapshot():
-    """DB에서 가장 마지막 저장된 데이터를 가져오는 함수"""
+    """DB에서 가장 최신 데이터 가져오기"""
     docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
         df['Date'] = pd.to_datetime(df['Date']).dt.date
-        save_date = d_dict.get('work_date', '날짜미상')
-        return df, save_date
+        save_dt = d_dict.get("save_time", "알수없음")
+        return df, save_dt
     return pd.DataFrame(), None
 
 # --- 6. 앱 초기화 및 사이드바 ---
@@ -229,10 +243,10 @@ st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 if 'channel_list' not in st.session_state: load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
-if 'prev_date_label' not in st.session_state: st.session_state.prev_date_label = None
+if 'compare_info' not in st.session_state: st.session_state.compare_info = None
 
 with st.sidebar:
-    st.header("📅 수정 내역 조회 (과거 기록용)")
+    st.header("📅 수정 내역 조회 (기록용)")
     work_day = st.date_input("조회할 작업 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
@@ -247,7 +261,7 @@ with st.sidebar:
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', list(st.session_state.promotions.keys()))
-            st.session_state.prev_date_label = f"기록 조회: {work_day}"
+            st.session_state.compare_info = f"조회 모드: {work_day} 저장본"
             found = True
         if found: st.success("기록 호출 성공")
         else: st.warning("내역 없음")
@@ -301,10 +315,11 @@ with st.sidebar:
             })
             st.success("팀 공유 서버 저장 완료!")
 
-# --- 7. 파일 로직 (자동 비교 기능 탑재) ---
+# --- 7. 파일 로직 (자동 최신 비교 기능 탑재) ---
 if files:
     all_extracted = []
-    ROW_MAP = {4: "GDB", 5: "GDF", 6: "FDB", 7: "FDE", 8: "FPT", 9: "FFD", 10: "HDP", 11: "HDT", 12: "HDF", 13: "PPV"}
+    # 사용자 지정 행 번호 (인덱스)
+    ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
 
     for f in files:
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
@@ -320,28 +335,28 @@ if files:
                     all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot, "Tag": date_tag})
 
     if all_extracted:
-        full_df = pd.DataFrame(all_extracted)
-        # 1. 오늘 올린 파일은 무조건 '현재 데이터(today_df)'
-        st.session_state.today_df = full_df.copy()
+        # [자동 비교 로직]
+        # 1. 오늘 올린 파일 -> today_df
+        st.session_state.today_df = pd.DataFrame(all_extracted)
         
-        # 2. 비교 대상(prev_df)은 DB 최신값 자동 호출
-        latest_df, save_date = get_latest_snapshot()
+        # 2. DB 최신본 -> prev_df (자동 호출)
+        latest_df, save_dt = get_latest_snapshot()
         if not latest_df.empty:
             st.session_state.prev_df = latest_df
-            st.session_state.prev_date_label = f"자동 비교 대상: {save_date} 저장본"
+            st.session_state.compare_info = f"자동 비교 대상: {save_dt} 저장본"
         else:
-            st.session_state.prev_date_label = "비교 대상 없음 (첫 실행)"
+            st.session_state.compare_info = "비교 대상 없음 (첫 데이터)"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
     
-    # 상단에 비교 대상 날짜 표시
-    if st.session_state.prev_date_label:
-        st.info(f"ℹ️ {st.session_state.prev_date_label}")
+    # [수정] 상단 비교 날짜 정보 표시
+    if st.session_state.compare_info:
+        st.info(f"ℹ️ {st.session_state.compare_info}")
         
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급별 채도 적용)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (자동 비교)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (DB 최신본과 자동 비교)", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
         st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
