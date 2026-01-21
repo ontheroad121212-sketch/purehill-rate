@@ -6,7 +6,7 @@ from firebase_admin import credentials, firestore
 import math
 import re
 
-# --- 1. 파이버베이스 초기화 (안전한 초기화) ---
+# --- 1. 파이버베이스 초기화 ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -16,7 +16,7 @@ if not firebase_admin._apps:
         st.error(f"파이어베이스 연결 실패: {e}")
 db = firestore.client()
 
-# --- 2. 전역 설정 데이터 (수정 금지) ---
+# --- 2. 전역 설정 데이터 ---
 BAR_GRADIENT_COLORS = {
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
@@ -48,72 +48,53 @@ FIXED_PRICE_TABLE = {
 # --- 3. 로직 함수 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
-    md = f"{m:02d}.{d:02d}"  # 날짜를 '02.13' 형태로 변환
-    
-    # 실제 요일 (4:금, 5:토 이면 주말)
+    md = f"{m:02d}.{d:02d}"
     actual_is_weekend = date_obj.weekday() in [4, 5]
-    
-    # --- [예외 규칙 1] 강제 성수기 주말 (UPP2) ---
-    # 2월 13~18일, 9월 23~28일 (요일 상관없이 무조건 성수기 주말)
     if ("02.13" <= md <= "02.18") or ("09.23" <= md <= "09.28"):
         season, is_weekend = "UPP", True
-        
-    # --- [예외 규칙 2] 강제 성수기 주중 (UPP1) ---
-    # 12월 21~31일, 10월 1~8일 (요일 상관없이 무조건 성수기 주중)
     elif ("12.21" <= md <= "12.31") or ("10.01" <= md <= "10.08"):
         season, is_weekend = "UPP", False
-        
-    # --- [예외 규칙 3] 강제 평수기 주말 (MID2) ---
-    # 5월 3~5일, 5월 24~26일, 6월 5~7일 (요일 상관없이 무조건 평수기 주말)
     elif ("05.03" <= md <= "05.05") or ("05.24" <= md <= "05.26") or ("06.05" <= md <= "06.07"):
         season, is_weekend = "MID", True
-
-    # --- [일반 규칙 1] 성수기 기간 (7/17 ~ 8/29) ---
     elif "07.17" <= md <= "08.29":
         season, is_weekend = "UPP", actual_is_weekend
-        
-    # --- [일반 규칙 2] 비수기 기본 (1/4~3/31, 11/1~12/20) ---
     elif ("01.04" <= md <= "03.31") or ("11.01" <= md <= "12.20"):
         season, is_weekend = "UND", actual_is_weekend
-        
-    # --- [일반 규칙 3] 평수기 기본 (나머지 전체) ---
     else:
         season, is_weekend = "MID", actual_is_weekend
-
-    # 최종 코드 생성
     type_code = f"{season}{'2' if is_weekend else '1'}"
     return type_code, season, is_weekend
 
 def determine_bar(season, is_weekend, occ):
     if season == "UPP":
-        if is_weekend: # BAR 4 ~ BAR 1
+        if is_weekend:
             if occ >= 81: return "BAR1"
             elif occ >= 51: return "BAR2"
             elif occ >= 31: return "BAR3"
             else: return "BAR4"
-        else: # BAR 5 ~ BAR 2
+        else:
             if occ >= 81: return "BAR2"
             elif occ >= 51: return "BAR3"
             elif occ >= 31: return "BAR4"
             else: return "BAR5"
     elif season == "MID":
-        if is_weekend: # BAR 6 ~ BAR 3
+        if is_weekend:
             if occ >= 81: return "BAR3"
             elif occ >= 51: return "BAR4"
             elif occ >= 31: return "BAR5"
             else: return "BAR6"
-        else: # BAR 7 ~ BAR 4
+        else:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else: # UND (비수기)
-        if is_weekend: # BAR 7 ~ BAR 4
+    else: # UND
+        if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-        else: # BAR 8 ~ BAR 5
+        else:
             if occ >= 81: return "BAR5"
             elif occ >= 51: return "BAR6"
             elif occ >= 31: return "BAR7"
@@ -130,9 +111,9 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (채도 적용 및 가로 스크롤) ---
+# --- 4. 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
-    if current_df.empty: return "<div style='padding:20px;'>리포트를 업로드하거나 데이터를 로드하세요.</div>"
+    if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     
@@ -206,7 +187,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table></div>"
     return html
 
-# --- 5. 파서 및 DB 로직 ---
+# --- 5. 파서 및 DB 로직 (자동 최신 호출 추가) ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
     try:
@@ -230,20 +211,30 @@ def load_channel_configs():
         st.session_state.channel_list = []
         st.session_state.promotions = {}
 
+def get_latest_snapshot():
+    """DB에서 가장 마지막 저장된 데이터를 가져오는 함수"""
+    docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
+    for doc in docs:
+        d_dict = doc.to_dict()
+        df = pd.DataFrame(d_dict['data'])
+        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        save_date = d_dict.get('work_date', '날짜미상')
+        return df, save_date
+    return pd.DataFrame(), None
+
 # --- 6. 앱 초기화 및 사이드바 ---
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
 
-# 중요: AttributeError 방지를 위해 세션 데이터 우선 로드
-if 'channel_list' not in st.session_state:
-    load_channel_configs()
+if 'channel_list' not in st.session_state: load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
+if 'prev_date_label' not in st.session_state: st.session_state.prev_date_label = None
 
 with st.sidebar:
-    st.header("📅 수정 내역 공유")
+    st.header("📅 수정 내역 조회 (과거 기록용)")
     work_day = st.date_input("조회할 작업 날짜", value=date.today())
-    if st.button("📂 팀 데이터 로드"):
+    if st.button("📂 과거 기록 불러오기"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
         for doc in docs:
@@ -256,8 +247,9 @@ with st.sidebar:
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', list(st.session_state.promotions.keys()))
+            st.session_state.prev_date_label = f"기록 조회: {work_day}"
             found = True
-        if found: st.success("팀 공유 데이터 로드 완료")
+        if found: st.success("기록 호출 성공")
         else: st.warning("내역 없음")
 
     st.divider()
@@ -289,7 +281,7 @@ with st.sidebar:
             if st.button(f"💾 {ch} 저장", key=f"s_{ch}"): save_channel_configs(); st.success("저장됨")
 
     st.divider()
-    files = st.file_uploader("리포트 업로드 (최대 12개)", accept_multiple_files=True)
+    files = st.file_uploader("리포트 업로드", accept_multiple_files=True)
     if st.button("🚀 오늘 내역 팀 공유 저장"):
         if not st.session_state.today_df.empty:
             t_df = st.session_state.today_df.copy()
@@ -309,66 +301,47 @@ with st.sidebar:
             })
             st.success("팀 공유 서버 저장 완료!")
 
-# --- 7. 파일 로직 (알려주신 고정 행 번호 100% 적용) ---
+# --- 7. 파일 로직 (자동 비교 기능 탑재) ---
 if files:
     all_extracted = []
-    
-    # 🔴 사용자 지정 행번호 정밀 매칭 (중복과 누락을 원천 차단)
-    # {인덱스: 객실ID} -> 엑셀 행 번호에서 1을 뺀 값입니다.
-    ROW_MAP = {
-        4: "GDB",   # 5행
-        5: "GDF",   # 6행
-        6: "FDB",   # 7행
-        7: "FDE",   # 8행
-        8: "FPT",   # 9행
-        9: "FFD",   # 10행
-        10: "HDP",  # 11행
-        11: "HDT",  # 12행
-        12: "HDF",  # 13행
-        13: "PPV"   # 14행
-    }
+    ROW_MAP = {4: "GDB", 5: "GDF", 6: "FDB", 7: "FDE", 8: "FPT", 9: "FFD", 10: "HDP", 11: "HDT", 12: "HDF", 13: "PPV"}
 
     for f in files:
-        # 파일명에서 날짜 추출 (예: 20260120)
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
-        
-        # 날짜 행 (3행 = index 2)
         dates_raw = df_raw.iloc[2, 2:].values
         
         for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
-                # Total 수량 (B열 = index 1)
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
-                
-                # Available 데이터 매칭 (C열부터 끝까지)
                 for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                     d_obj = robust_date_parser(d_val)
                     if d_obj is None or pd.isna(av): continue
-                    
-                    all_extracted.append({
-                        "Date": d_obj, 
-                        "RoomID": rid, 
-                        "Available": pd.to_numeric(av, errors='coerce'), # 숫자로 강제 변환
-                        "Total": tot, 
-                        "Tag": date_tag
-                    })
+                    all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot, "Tag": date_tag})
 
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
-        # 태그(날짜) 순으로 정렬하여 가장 최신을 '오늘', 그 전을 '비교군'으로 설정
-        tags = sorted(full_df['Tag'].unique())
-        if len(tags) >= 2:
-            st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
-            st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
+        # 1. 오늘 올린 파일은 무조건 '현재 데이터(today_df)'
+        st.session_state.today_df = full_df.copy()
+        
+        # 2. 비교 대상(prev_df)은 DB 최신값 자동 호출
+        latest_df, save_date = get_latest_snapshot()
+        if not latest_df.empty:
+            st.session_state.prev_df = latest_df
+            st.session_state.prev_date_label = f"자동 비교 대상: {save_date} 저장본"
         else:
-            st.session_state.today_df = full_df.copy()
+            st.session_state.prev_date_label = "비교 대상 없음 (첫 실행)"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
+    
+    # 상단에 비교 대상 날짜 표시
+    if st.session_state.prev_date_label:
+        st.info(f"ℹ️ {st.session_state.prev_date_label}")
+        
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급별 채도 적용)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (행 번호 고정 매칭 완료)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (자동 비교)", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
         st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
