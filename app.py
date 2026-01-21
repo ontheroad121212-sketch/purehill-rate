@@ -111,7 +111,7 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 ---
+# --- 4. 렌더러 (1번 통에 가격 표시 추가) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
@@ -182,7 +182,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
-                content = f"<b>{bar}</b><br>{occ:.0f}%"
+                # [수정] BAR 등급과 금액을 같이 표시 (예: BAR3 (567,000))
+                content = f"<b>{bar}</b> ({base_price:,})<br>{occ:.0f}%"
             
             elif mode == "변화":
                 pickup = (prev_avail - avail) if prev_avail is not None else 0
@@ -245,7 +246,6 @@ def get_latest_snapshot():
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
-        # [수정] 데이터 프레임이 비어있지 않을 때만 날짜 변환
         if not df.empty and 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
@@ -272,7 +272,6 @@ with st.sidebar:
             if not st.session_state.today_df.empty:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
             
-            # [수정] prev_data가 비어있어도 에러 안 나게 처리 (KeyError 방지)
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
