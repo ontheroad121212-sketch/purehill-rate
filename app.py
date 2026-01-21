@@ -5,6 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 import re
+import uuid  # 고유 ID 생성을 위해 추가
 
 # --- 1. 파이버베이스 초기화 ---
 if not firebase_admin._apps:
@@ -45,7 +46,7 @@ FIXED_PRICE_TABLE = {
     "PPV": {"UND1": 1100000, "UND2": 1100000, "MID1": 1250000, "MID2": 1250000, "UPP1": 1400000, "UPP2": 1400000},
 }
 
-# --- 3. 로직 함수 (시즌 판별) ---
+# --- 3. 로직 함수 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
@@ -111,12 +112,22 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (채도, 가로스크롤, 유채색 변화) ---
+# --- 4. 렌더러 (상품 무한 생성 로직 반영) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
-    if current_df.empty: return "<div style='padding:20px;'>데이터를 불러올 수 없습니다. 파일을 업로드하세요.</div>"
+    if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
-    rooms_to_show = ALL_ROOMS if mode != "판매가" else st.session_state.promotions.get(ch_name, {}).get("selected_rooms", ALL_ROOMS)
     
+    # [수정 포인트] 판매가 모드일 때는 채널에 설정된 '모든 상품 아이템'을 가져옴
+    if mode == "판매가":
+        # 해당 채널에 설정된 상품 리스트 (없으면 빈 리스트)
+        items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
+    else:
+        # 기준, 변화량 모드일 때는 그냥 10개 객실 표시
+        items_to_show = ALL_ROOMS
+
+    if mode == "판매가" and not items_to_show:
+        return f"<div style='padding:10px; color:red;'>🚨 {ch_name} 채널에 설정된 상품이 없습니다. 왼쪽 사이드바에서 상품을 추가해주세요.</div>"
+
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
     html += "<table style='width:100%; border-collapse:collapse; font-size:11px; min-width:1200px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:150px; position:sticky; left:0; background:#f9f9f9; z-index:2;'>객실/프로모션</th>"
@@ -128,27 +139,34 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         html += f"<th style='border:1px solid #ddd; padding:5px; color:{color};'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
-    for rid in rooms_to_show:
-        label = rid
+    for item in items_to_show:
+        # [수정 포인트] 판매가 모드와 일반 모드의 변수 처리 분리
         if mode == "판매가":
-            ch_cfg = st.session_state.promotions.get(ch_name, {}).get("config", {})
-            rid_cfg = ch_cfg.get(rid, {"name": rid})
-            label = f"<b>{rid}</b><br><small style='color:blue;'>{rid_cfg.get('name', rid)}</small>"
-        
+            # 커스텀 상품인 경우 (item은 딕셔너리)
+            rid = item['base_room']
+            label_text = item['name'] # 예: FDB_조식포함
+            label = f"<b>{rid}</b><br><small style='color:blue;'>{label_text}</small>"
+            discount = item.get('discount', 0)
+            add_price = item.get('add_price', 0)
+        else:
+            # 일반 객실인 경우 (item은 문자열 'FDB' 등)
+            rid = item
+            label = rid
+            if rid in ["HDF", "PPV"]: label = f"<b>{rid}</b>"
+
         border_thick = "border-bottom:3.4px solid #000;" if rid in ["HDF", "PPV"] else ""
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'>{label}</td>"
         
         for d in dates:
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
-                html += "<td style='border:1px solid #ddd; padding:8px;'>-</td>"
+                html += "<td style='border:1px solid #ddd; padding:8px; text-align:center;'>-</td>"
                 continue
-            
+
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             
-            # 이전 데이터 찾기
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
@@ -164,11 +182,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{bar}</b><br>{occ:.0f}%"
             
             elif mode == "변화":
-                # 이전 데이터가 있을 때만 계산, 없으면 0
                 pickup = (prev_avail - avail) if prev_avail is not None else 0
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
-                
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
                     content = f"+{pickup}"
@@ -185,9 +201,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = bar
             
             elif mode == "판매가":
-                conf = st.session_state.promotions.get(ch_name, {}).get("config", {}).get(rid, {"discount_rate": 0, "add_price": 0})
-                after_disc = base_price * (1 - (conf.get('discount_rate', 0) / 100))
-                final_p = int((math.floor(after_disc / 1000) * 1000) + conf.get('add_price', 0))
+                # [수정 포인트] 개별 상품의 할인율 적용
+                after_disc = base_price * (1 - (discount / 100))
+                final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 content = f"<b>{final_p:,}</b>"
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
@@ -241,8 +257,8 @@ if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
 
 with st.sidebar:
-    st.header("📅 수정 내역 조회 (과거)")
-    work_day = st.date_input("조회할 날짜", value=date.today())
+    st.header("📅 수정 내역 조회")
+    work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 보기"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
@@ -256,38 +272,70 @@ with st.sidebar:
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
-            st.session_state.compare_label = f"과거 기록 모드: {work_day}"
+            st.session_state.compare_label = f"과거 조회: {work_day}"
             found = True
-        if found: st.success("로드 성공")
+        if found: st.success("로드 완료")
         else: st.warning("데이터 없음")
 
     st.divider()
-    st.header("🎯 채널 관리")
+    st.header("🎯 채널 & 상품 관리 (핀셋 조정)")
     new_ch = st.text_input("새 채널 명칭")
     if st.button("➕ 채널 추가"):
         if new_ch and new_ch not in st.session_state.channel_list:
             st.session_state.channel_list.append(new_ch)
-            st.session_state.promotions[new_ch] = {"selected_rooms": ALL_ROOMS.copy(), "config": {rid: {"name": f"{new_ch}_{rid}", "discount_rate": 0, "add_price": 0} for rid in ALL_ROOMS}}
+            # [수정] items 리스트 초기화
+            st.session_state.promotions[new_ch] = {"items": []}
             save_channel_configs(); st.rerun()
 
     for ch in st.session_state.channel_list:
-        with st.expander(f"📦 {ch} 설정"):
+        with st.expander(f"📦 {ch} 상품 관리"):
             if st.button(f"❌ {ch} 삭제", key=f"del_{ch}"):
                 st.session_state.channel_list.remove(ch)
                 st.session_state.promotions.pop(ch, None)
                 save_channel_configs(); st.rerun()
-            c_sel = st.session_state.promotions[ch].get("selected_rooms", ALL_ROOMS)
-            new_sel = []
-            for r in ALL_ROOMS:
-                if st.checkbox(r, value=(r in c_sel), key=f"cb_{ch}_{r}"): new_sel.append(r)
-            st.session_state.promotions[ch]["selected_rooms"] = new_sel
-            for rid in new_sel:
-                cfg = st.session_state.promotions[ch]["config"].setdefault(rid, {"name": f"{ch}_{rid}", "discount_rate": 0, "add_price": 0})
-                cfg['name'] = st.text_input(f"{rid} 명칭", value=cfg['name'], key=f"n_{ch}_{rid}")
-                c1, c2 = st.columns(2)
-                cfg['discount_rate'] = c1.number_input("할인(%)", value=float(cfg['discount_rate']), key=f"d_{ch}_{rid}")
-                cfg['add_price'] = c2.number_input("추가금", value=int(cfg['add_price']), step=1000, key=f"a_{ch}_{rid}")
-            if st.button(f"💾 {ch} 저장", key=f"s_{ch}"): save_channel_configs(); st.success("저장됨")
+            
+            # [수정 포인트] 상품 무한 생성 UI
+            st.markdown("---")
+            st.markdown("**상품 추가**")
+            c1, c2 = st.columns([1, 2])
+            target_room = c1.selectbox("객실", ALL_ROOMS, key=f"sel_{ch}")
+            item_name = c2.text_input("상품명 (예: 조식포함)", value=f"{target_room}_기본", key=f"nm_{ch}")
+            if st.button(f"➕ {ch}에 상품 추가", key=f"add_item_{ch}"):
+                if "items" not in st.session_state.promotions[ch]:
+                    st.session_state.promotions[ch]["items"] = []
+                # 고유 ID 부여하여 리스트에 추가
+                new_item = {
+                    "id": str(uuid.uuid4()), 
+                    "base_room": target_room, 
+                    "name": item_name, 
+                    "discount": 0.0, 
+                    "add_price": 0
+                }
+                st.session_state.promotions[ch]["items"].append(new_item)
+                save_channel_configs(); st.rerun()
+
+            # 생성된 상품 리스트 출력 및 수정
+            items = st.session_state.promotions.get(ch, {}).get("items", [])
+            if items:
+                st.markdown("---")
+                st.markdown("**생성된 상품 목록**")
+                for idx, item in enumerate(items):
+                    with st.container():
+                        cols = st.columns([2, 1, 1, 0.5])
+                        cols[0].text(f"{item['base_room']} - {item['name']}")
+                        # 리스트 내부 값 수정
+                        new_disc = cols[1].number_input("할인%", value=float(item['discount']), key=f"d_{ch}_{item['id']}")
+                        new_add = cols[2].number_input("추가금", value=int(item['add_price']), step=1000, key=f"a_{ch}_{item['id']}")
+                        
+                        # 값이 변했으면 저장
+                        if new_disc != item['discount'] or new_add != item['add_price']:
+                            item['discount'] = new_disc
+                            item['add_price'] = new_add
+                            save_channel_configs()
+
+                        if cols[3].button("🗑", key=f"rm_{ch}_{item['id']}"):
+                            items.pop(idx)
+                            save_channel_configs(); st.rerun()
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (복수 가능)", accept_multiple_files=True)
@@ -310,17 +358,15 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 7. 파일 로직 (파일 간 비교 우선 + DB 자동 백업) ---
+# --- 7. 파일 로직 ---
 if files:
     all_extracted = []
-    # 사용자 지정 행: GDB(5), GDF(6), FDB(7), FDE(8), FPT(9), FFD(10), HDP(11), HDT(12), HDF(13), PPV(14)
-    # 인덱스(0부터): 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
     ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
 
     for f in files:
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
-        dates_raw = df_raw.iloc[2, 2:].values # 날짜행 (3행)
+        dates_raw = df_raw.iloc[2, 2:].values
         
         for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
@@ -333,14 +379,10 @@ if files:
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
         tags = sorted(full_df['Tag'].unique())
-        
-        # [핵심] 파일이 2개 이상이면 파일끼리 비교 (DB 무시)
         if len(tags) >= 2:
             st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
             st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
             st.session_state.compare_label = f"파일 간 비교: {tags[-2]} vs {tags[-1]}"
-        
-        # [핵심] 파일이 1개면 DB 최신본과 비교
         else:
             st.session_state.today_df = full_df.copy()
             latest_df, save_dt = get_latest_snapshot()
@@ -348,8 +390,8 @@ if files:
                 st.session_state.prev_df = latest_df
                 st.session_state.compare_label = f"자동 DB 비교: {save_dt} 저장본"
             else:
-                st.session_state.prev_df = pd.DataFrame() # 비교군 없음
-                st.session_state.compare_label = "비교 대상 없음 (첫 시작)"
+                st.session_state.prev_df = pd.DataFrame()
+                st.session_state.compare_label = "비교 대상 없음"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
@@ -358,8 +400,8 @@ if not st.session_state.today_df.empty:
     if st.session_state.compare_label:
         st.info(f"ℹ️ {st.session_state.compare_label}")
         
-    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석 (BAR 등급별 채도 적용)", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량 (파일/DB 자동 비교)", mode="변화"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
+    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
         st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
