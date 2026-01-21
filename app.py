@@ -111,14 +111,13 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (상품 리스트 대응) ---
+# --- 4. 렌더러 (에러 수정 및 안전장치 강화) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     
-    # [설정] 표시할 항목 결정
+    # 표시할 아이템 결정
     if mode == "판매가":
-        # 해당 채널에 설정된 상품 리스트 가져오기
         items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
     else:
         items_to_show = ALL_ROOMS
@@ -139,12 +138,20 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
     for item in items_to_show:
         if mode == "판매가":
-            # 커스텀 상품 데이터 추출 (DataFrame에서 왔으므로 키값 접근)
-            rid = item.get('객실타입')
-            label_text = item.get('상품명')
+            # [🔴 에러 수정 포인트] 안전하게 값 가져오기
+            # 값이 없거나 None이면 0으로 처리하는 로직
+            rid = item.get('객실타입', 'Unknown')
+            label_text = item.get('상품명', 'No Name')
             label = f"<b>{rid}</b><br><small style='color:blue;'>{label_text}</small>"
-            discount = float(item.get('할인(%)', 0))
-            add_price = int(item.get('추가금', 0))
+            
+            # None 또는 빈 값 처리 (안전장치)
+            try:
+                discount = float(item.get('할인(%)') or 0)
+            except: discount = 0.0
+            
+            try:
+                add_price = int(item.get('추가금') or 0)
+            except: add_price = 0
         else:
             rid = item
             label = rid
@@ -278,7 +285,6 @@ with st.sidebar:
     if st.button("➕ 채널 추가"):
         if new_ch and new_ch not in st.session_state.channel_list:
             st.session_state.channel_list.append(new_ch)
-            # items 리스트 초기화 (중요)
             st.session_state.promotions[new_ch] = {"items": []}
             save_channel_configs(); st.rerun()
 
@@ -289,21 +295,16 @@ with st.sidebar:
                 st.session_state.promotions.pop(ch, None)
                 save_channel_configs(); st.rerun()
             
-            # [핀셋 조정 완료] st.data_editor 도입 (엑셀처럼 편집)
             st.info("아래 표에서 바로 수정/추가/삭제 하세요.")
-            
-            # 현재 데이터 가져오기
             current_items = st.session_state.promotions[ch].get("items", [])
             df_editor = pd.DataFrame(current_items)
             
-            # 처음이라 비어있으면 기본 컬럼 구조 잡아주기
             if df_editor.empty:
                 df_editor = pd.DataFrame(columns=["객실타입", "상품명", "할인(%)", "추가금"])
 
-            # 에디터 설정
             edited_df = st.data_editor(
                 df_editor,
-                num_rows="dynamic", # 행 추가/삭제 가능
+                num_rows="dynamic",
                 column_config={
                     "객실타입": st.column_config.SelectboxColumn(options=ALL_ROOMS, required=True),
                     "상품명": st.column_config.TextColumn(required=True),
@@ -314,9 +315,7 @@ with st.sidebar:
                 use_container_width=True
             )
 
-            # 저장 버튼 (속도 개선: 누를 때만 DB 저장)
             if st.button(f"💾 {ch} 설정 저장", key=f"save_{ch}"):
-                # DataFrame을 다시 딕셔너리 리스트로 변환하여 저장
                 updated_items = edited_df.to_dict(orient="records")
                 st.session_state.promotions[ch]["items"] = updated_items
                 save_channel_configs()
