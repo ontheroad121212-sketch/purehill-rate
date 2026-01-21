@@ -111,43 +111,45 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (1번 통에 가격 표시 추가) ---
+# --- 4. 렌더러 (핀셋 조정: 1번 통 3단 수직 배치) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     
     if mode == "판매가":
         items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
-        row_padding = "2px"
+        row_padding = "1px"
         header_padding = "2px"
-        line_style = "line-height: 1.1;"
+        line_style = "line-height: 1.0; font-size: 11px;"
         font_size = "11px"
+        col_width_style = "min-width: 45px;"
     else:
         items_to_show = ALL_ROOMS
         row_padding = "8px"
         header_padding = "5px"
         line_style = ""
         font_size = "11px"
+        col_width_style = ""
 
     if mode == "판매가" and not items_to_show:
         return f"<div style='padding:10px; color:gray;'>👉 왼쪽 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
 
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
-    html += f"<table style='width:100%; border-collapse:collapse; font-size:{font_size}; min-width:1200px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:150px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:{header_padding};'>객실/프로모션</th>"
-    for d in dates: html += f"<th style='border:1px solid #ddd; padding:{header_padding};'>{d.strftime('%m-%d')}</th>"
+    html += f"<table style='width:100%; border-collapse:collapse; font-size:{font_size}; min-width:1000px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:180px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:{header_padding};'>객실/프로모션</th>"
+    for d in dates: html += f"<th style='border:1px solid #ddd; padding:{header_padding}; {col_width_style}'>{d.strftime('%m-%d')}</th>"
     html += "</tr><tr style='background:#f9f9f9;'>"
     for d in dates:
         wd = WEEKDAYS_KR[d.weekday()]
         color = "red" if wd=='일' else ("blue" if wd=='토' else "black")
-        html += f"<th style='border:1px solid #ddd; padding:{header_padding}; color:{color};'>{wd}</th>"
+        html += f"<th style='border:1px solid #ddd; padding:{header_padding}; color:{color}; {col_width_style}'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
     for item in items_to_show:
         if mode == "판매가":
             rid = item.get('객실타입', 'Unknown')
             label_text = item.get('상품명', 'No Name')
-            label = f"<b>{rid}</b><br><small style='color:blue;'>{label_text}</small>"
+            label = f"<b>{rid}</b> <span style='color:blue; margin-left:4px;'>: {label_text}</span>"
             try: discount = float(item.get('할인(%)') or 0)
             except: discount = 0.0
             try: add_price = int(item.get('추가금') or 0)
@@ -182,8 +184,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
-                # [수정] BAR 등급과 금액을 같이 표시 (예: BAR3 (567,000))
-                content = f"<b>{bar}</b> ({base_price:,})<br>{occ:.0f}%"
+                # [수정] 3단 수직 배치 (BAR / 금액 / OCC)
+                content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 pickup = (prev_avail - avail) if prev_avail is not None else 0
