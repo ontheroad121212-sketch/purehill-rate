@@ -5,7 +5,6 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 import re
-import uuid  # 고유 ID 생성을 위해 추가
 
 # --- 1. 파이버베이스 초기화 ---
 if not firebase_admin._apps:
@@ -112,21 +111,20 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (상품 무한 생성 로직 반영) ---
+# --- 4. 렌더러 (상품 리스트 대응) ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     
-    # [수정 포인트] 판매가 모드일 때는 채널에 설정된 '모든 상품 아이템'을 가져옴
+    # [설정] 표시할 항목 결정
     if mode == "판매가":
-        # 해당 채널에 설정된 상품 리스트 (없으면 빈 리스트)
+        # 해당 채널에 설정된 상품 리스트 가져오기
         items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
     else:
-        # 기준, 변화량 모드일 때는 그냥 10개 객실 표시
         items_to_show = ALL_ROOMS
 
     if mode == "판매가" and not items_to_show:
-        return f"<div style='padding:10px; color:red;'>🚨 {ch_name} 채널에 설정된 상품이 없습니다. 왼쪽 사이드바에서 상품을 추가해주세요.</div>"
+        return f"<div style='padding:10px; color:gray;'>👉 왼쪽 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
 
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
@@ -140,16 +138,14 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tr></thead><tbody>"
 
     for item in items_to_show:
-        # [수정 포인트] 판매가 모드와 일반 모드의 변수 처리 분리
         if mode == "판매가":
-            # 커스텀 상품인 경우 (item은 딕셔너리)
-            rid = item['base_room']
-            label_text = item['name'] # 예: FDB_조식포함
+            # 커스텀 상품 데이터 추출 (DataFrame에서 왔으므로 키값 접근)
+            rid = item.get('객실타입')
+            label_text = item.get('상품명')
             label = f"<b>{rid}</b><br><small style='color:blue;'>{label_text}</small>"
-            discount = item.get('discount', 0)
-            add_price = item.get('add_price', 0)
+            discount = float(item.get('할인(%)', 0))
+            add_price = int(item.get('추가금', 0))
         else:
-            # 일반 객실인 경우 (item은 문자열 'FDB' 등)
             rid = item
             label = rid
             if rid in ["HDF", "PPV"]: label = f"<b>{rid}</b>"
@@ -201,7 +197,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = bar
             
             elif mode == "판매가":
-                # [수정 포인트] 개별 상품의 할인율 적용
                 after_disc = base_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 content = f"<b>{final_p:,}</b>"
@@ -278,64 +273,54 @@ with st.sidebar:
         else: st.warning("데이터 없음")
 
     st.divider()
-    st.header("🎯 채널 & 상품 관리 (핀셋 조정)")
+    st.header("🎯 채널 & 상품 관리 (이지 에디터)")
     new_ch = st.text_input("새 채널 명칭")
     if st.button("➕ 채널 추가"):
         if new_ch and new_ch not in st.session_state.channel_list:
             st.session_state.channel_list.append(new_ch)
-            # [수정] items 리스트 초기화
+            # items 리스트 초기화 (중요)
             st.session_state.promotions[new_ch] = {"items": []}
             save_channel_configs(); st.rerun()
 
     for ch in st.session_state.channel_list:
-        with st.expander(f"📦 {ch} 상품 관리"):
-            if st.button(f"❌ {ch} 삭제", key=f"del_{ch}"):
+        with st.expander(f"📦 {ch} 상품 편집"):
+            if st.button(f"❌ {ch} 채널 삭제", key=f"del_{ch}"):
                 st.session_state.channel_list.remove(ch)
                 st.session_state.promotions.pop(ch, None)
                 save_channel_configs(); st.rerun()
             
-            # [수정 포인트] 상품 무한 생성 UI
-            st.markdown("---")
-            st.markdown("**상품 추가**")
-            c1, c2 = st.columns([1, 2])
-            target_room = c1.selectbox("객실", ALL_ROOMS, key=f"sel_{ch}")
-            item_name = c2.text_input("상품명 (예: 조식포함)", value=f"{target_room}_기본", key=f"nm_{ch}")
-            if st.button(f"➕ {ch}에 상품 추가", key=f"add_item_{ch}"):
-                if "items" not in st.session_state.promotions[ch]:
-                    st.session_state.promotions[ch]["items"] = []
-                # 고유 ID 부여하여 리스트에 추가
-                new_item = {
-                    "id": str(uuid.uuid4()), 
-                    "base_room": target_room, 
-                    "name": item_name, 
-                    "discount": 0.0, 
-                    "add_price": 0
-                }
-                st.session_state.promotions[ch]["items"].append(new_item)
-                save_channel_configs(); st.rerun()
+            # [핀셋 조정 완료] st.data_editor 도입 (엑셀처럼 편집)
+            st.info("아래 표에서 바로 수정/추가/삭제 하세요.")
+            
+            # 현재 데이터 가져오기
+            current_items = st.session_state.promotions[ch].get("items", [])
+            df_editor = pd.DataFrame(current_items)
+            
+            # 처음이라 비어있으면 기본 컬럼 구조 잡아주기
+            if df_editor.empty:
+                df_editor = pd.DataFrame(columns=["객실타입", "상품명", "할인(%)", "추가금"])
 
-            # 생성된 상품 리스트 출력 및 수정
-            items = st.session_state.promotions.get(ch, {}).get("items", [])
-            if items:
-                st.markdown("---")
-                st.markdown("**생성된 상품 목록**")
-                for idx, item in enumerate(items):
-                    with st.container():
-                        cols = st.columns([2, 1, 1, 0.5])
-                        cols[0].text(f"{item['base_room']} - {item['name']}")
-                        # 리스트 내부 값 수정
-                        new_disc = cols[1].number_input("할인%", value=float(item['discount']), key=f"d_{ch}_{item['id']}")
-                        new_add = cols[2].number_input("추가금", value=int(item['add_price']), step=1000, key=f"a_{ch}_{item['id']}")
-                        
-                        # 값이 변했으면 저장
-                        if new_disc != item['discount'] or new_add != item['add_price']:
-                            item['discount'] = new_disc
-                            item['add_price'] = new_add
-                            save_channel_configs()
+            # 에디터 설정
+            edited_df = st.data_editor(
+                df_editor,
+                num_rows="dynamic", # 행 추가/삭제 가능
+                column_config={
+                    "객실타입": st.column_config.SelectboxColumn(options=ALL_ROOMS, required=True),
+                    "상품명": st.column_config.TextColumn(required=True),
+                    "할인(%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=1),
+                    "추가금": st.column_config.NumberColumn(step=1000, format="%d")
+                },
+                key=f"editor_{ch}",
+                use_container_width=True
+            )
 
-                        if cols[3].button("🗑", key=f"rm_{ch}_{item['id']}"):
-                            items.pop(idx)
-                            save_channel_configs(); st.rerun()
+            # 저장 버튼 (속도 개선: 누를 때만 DB 저장)
+            if st.button(f"💾 {ch} 설정 저장", key=f"save_{ch}"):
+                # DataFrame을 다시 딕셔너리 리스트로 변환하여 저장
+                updated_items = edited_df.to_dict(orient="records")
+                st.session_state.promotions[ch]["items"] = updated_items
+                save_channel_configs()
+                st.success("저장 완료!")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (복수 가능)", accept_multiple_files=True)
