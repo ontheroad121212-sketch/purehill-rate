@@ -312,32 +312,57 @@ with st.sidebar:
 # --- 7. 파일 로직 (알려주신 고정 행 번호 100% 적용) ---
 if files:
     all_extracted = []
-    # 🔴 사용자 지정 행번호 고정 매칭
-    # 5행(idx 4), 6행(idx 5), 9행(idx 8), 10행(idx 9), 14행(idx 13)
-    FIXED_MAP = {4: "GDB", 5: "GDF", 8: "FPT", 9: "FFD", 13: "PPV"}
-    # 기존 유동 객실 5종 매칭 (7, 8, 11, 12, 13행 기준)
-    DYN_MAP = {6: "FDB", 7: "FDE", 10: "HDP", 11: "HDT", 12: "HDF"}
+    
+    # 🔴 사용자 지정 행번호 정밀 매칭 (중복과 누락을 원천 차단)
+    # {인덱스: 객실ID} -> 엑셀 행 번호에서 1을 뺀 값입니다.
+    ROW_MAP = {
+        4: "GDB",   # 5행
+        5: "GDF",   # 6행
+        6: "FDB",   # 7행
+        7: "FDE",   # 8행
+        8: "FPT",   # 9행
+        9: "FFD",   # 10행
+        10: "HDP",  # 11행
+        11: "HDT",  # 12행
+        12: "HDF",  # 13행
+        13: "PPV"   # 14행
+    }
 
     for f in files:
+        # 파일명에서 날짜 추출 (예: 20260120)
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
+        
+        # 날짜 행 (3행 = index 2)
         dates_raw = df_raw.iloc[2, 2:].values
         
-        # 고정 및 유동 객실 데이터 강제 병합
-        for r_idx, rid in {**FIXED_MAP, **DYN_MAP}.items():
+        for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
+                # Total 수량 (B열 = index 1)
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
+                
+                # Available 데이터 매칭 (C열부터 끝까지)
                 for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                     d_obj = robust_date_parser(d_val)
                     if d_obj is None or pd.isna(av): continue
-                    all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": av, "Total": tot, "Tag": date_tag})
+                    
+                    all_extracted.append({
+                        "Date": d_obj, 
+                        "RoomID": rid, 
+                        "Available": pd.to_numeric(av, errors='coerce'), # 숫자로 강제 변환
+                        "Total": tot, 
+                        "Tag": date_tag
+                    })
 
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
+        # 태그(날짜) 순으로 정렬하여 가장 최신을 '오늘', 그 전을 '비교군'으로 설정
         tags = sorted(full_df['Tag'].unique())
         if len(tags) >= 2:
-            st.session_state.today_df, st.session_state.prev_df = full_df[full_df['Tag']==tags[-1]].copy(), full_df[full_df['Tag']==tags[-2]].copy()
-        else: st.session_state.today_df = full_df.copy()
+            st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
+            st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
+        else:
+            st.session_state.today_df = full_df.copy()
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
