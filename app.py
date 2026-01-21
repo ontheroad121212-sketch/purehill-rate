@@ -111,22 +111,19 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (핀셋 조정: 판매가 모드일 때 행 높이 1/2로 축소) ---
+# --- 4. 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     
-    # [설정] 표시할 항목 및 스타일 결정
     if mode == "판매가":
         items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
-        # 판매가 모드는 간격을 매우 좁힘 (padding 2px, line-height 1.1)
         row_padding = "2px"
         header_padding = "2px"
         line_style = "line-height: 1.1;"
         font_size = "11px"
     else:
         items_to_show = ALL_ROOMS
-        # 기본 모드는 기존 간격 유지 (padding 8px)
         row_padding = "8px"
         header_padding = "5px"
         line_style = ""
@@ -148,7 +145,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
     for item in items_to_show:
         if mode == "판매가":
-            # 안전하게 값 가져오기
             rid = item.get('객실타입', 'Unknown')
             label_text = item.get('상품명', 'No Name')
             label = f"<b>{rid}</b><br><small style='color:blue;'>{label_text}</small>"
@@ -162,7 +158,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if rid in ["HDF", "PPV"]: label = f"<b>{rid}</b>"
 
         border_thick = "border-bottom:3.4px solid #000;" if rid in ["HDF", "PPV"] else ""
-        # 왼쪽 고정 컬럼에도 좁은 패딩 적용
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:{row_padding}; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1; {line_style}'>{label}</td>"
         
         for d in dates:
@@ -182,7 +177,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     prev_avail = prev_m.iloc[0]['Available']
                     _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
 
-            # 데이터 셀 스타일에도 좁은 패딩과 line-height 적용
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
             
             if mode == "기준":
@@ -251,7 +245,9 @@ def get_latest_snapshot():
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
-        df['Date'] = pd.to_datetime(df['Date']).dt.date
+        # [수정] 데이터 프레임이 비어있지 않을 때만 날짜 변환
+        if not df.empty and 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
     return pd.DataFrame(), None
 
@@ -273,10 +269,17 @@ with st.sidebar:
         for doc in docs:
             d_dict = doc.to_dict()
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
-            st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
-            if 'prev_data' in d_dict:
+            if not st.session_state.today_df.empty:
+                st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
+            
+            # [수정] prev_data가 비어있어도 에러 안 나게 처리 (KeyError 방지)
+            if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
-                st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
+                if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
+                    st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
+            else:
+                st.session_state.prev_df = pd.DataFrame()
+
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
