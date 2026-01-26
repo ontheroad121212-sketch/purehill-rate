@@ -174,6 +174,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
+                # [수정] 날짜 매칭이 정확히 되는지 확인
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
@@ -187,9 +188,12 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
+                # [수정] 이전 데이터가 없으면 변화량은 0 (혹은 - 표시)
                 pickup = (prev_avail - avail) if prev_avail is not None else 0
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
+                
+                # pickup이 0이 아니면 표시
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
                     content = f"+{pickup}"
@@ -247,7 +251,7 @@ def get_latest_snapshot():
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
-        # [중요] 날짜 객체 변환 강제
+        # [중요 수정] 불러온 즉시 날짜 형식 강제 통일 (시간 제거)
         if not df.empty and 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
@@ -271,12 +275,12 @@ with st.sidebar:
         for doc in docs:
             d_dict = doc.to_dict()
             
-            # [핀셋 조정 1] 로드된 데이터 세션 저장
+            # [핀셋 수정] 불러온 데이터(today_df)의 날짜 형식도 확실하게 Date로 변환
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
-            if not st.session_state.today_df.empty:
+            if not st.session_state.today_df.empty and 'Date' in st.session_state.today_df.columns:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
             
-            # [핀셋 조정 2] 저장된 Prev_Data 불러올 때도 날짜 변환 필수
+            # [핀셋 수정] 비교 데이터(prev_df)도 날짜 변환
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
@@ -356,7 +360,7 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 7. 파일 로직 (핀셋 조정: 파일끼리 비교 삭제, 자동 로드만 수행) ---
+# --- 7. 파일 로직 ---
 if files:
     all_extracted = []
     ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
@@ -376,21 +380,28 @@ if files:
 
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
-        # [수정] 파일 개수 무관하게 무조건 최신 태그를 '오늘 데이터'로 사용
         tags = sorted(full_df['Tag'].unique())
-        st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
         
-        # [핵심] 사용자가 사이드바에서 이미 로드한 데이터가 있으면 덮어쓰지 않음
-        # 로드한 데이터가 없을 때만 DB 최신본을 자동으로 가져옴
-        if st.session_state.prev_df.empty:
-            latest_df, save_dt = get_latest_snapshot()
-            if not latest_df.empty:
-                st.session_state.prev_df = latest_df
-                st.session_state.compare_label = f"자동 DB 비교: {save_dt} 저장본"
-            else:
-                # DB도 비었으면 비교 안 함 (색 변화 없음, 흰색 출력)
-                st.session_state.prev_df = pd.DataFrame()
-                st.session_state.compare_label = "비교 대상 없음 (신규)"
+        # 1. 파일이 2개 이상 (파일끼리 비교)
+        if len(tags) >= 2:
+            st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
+            st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
+            st.session_state.compare_label = f"파일 간 비교: {tags[-2]} vs {tags[-1]}"
+        
+        # 2. 파일이 1개 (DB 또는 로드된 데이터와 비교)
+        else:
+            st.session_state.today_df = full_df.copy()
+            
+            # [핵심] 사이드바에서 로드된 prev_df가 없으면 -> DB에서 가져옴
+            # 로드된게 있으면 -> 그대로 둠 (덮어쓰기 방지)
+            if st.session_state.prev_df.empty:
+                latest_df, save_dt = get_latest_snapshot()
+                if not latest_df.empty:
+                    st.session_state.prev_df = latest_df
+                    st.session_state.compare_label = f"자동 DB 비교: {save_dt} 저장본"
+                else:
+                    st.session_state.prev_df = pd.DataFrame()
+                    st.session_state.compare_label = "비교 대상 없음 (신규)"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
