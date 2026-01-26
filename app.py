@@ -88,7 +88,7 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else:
+    else: # UND
         if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
@@ -102,9 +102,11 @@ def determine_bar(season, is_weekend, occ):
 
 def get_final_values(room_id, date_obj, avail, total):
     type_code, season, is_weekend = get_season_details(date_obj)
+    # [계산] 재고(Avail)가 변하면 -> OCC가 변하고 -> BAR가 변함 (핵심 연결고리)
     try: current_avail = float(avail) if pd.notna(avail) else 0.0
     except: current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
+    
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
@@ -166,19 +168,26 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         
         for d in dates:
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            
+            # [수정] 빈 값도 칸 유지
             if curr_match.empty:
                 html += f"<td style='border:1px solid #ddd; padding:{row_padding}; text-align:center;'>-</td>"
                 continue
 
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
+            
+            # 1. 오늘 재고 기반으로 BAR/요금/OCC 계산
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             
+            # 2. 이전 데이터(Prev) 불러오기
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
+                    # [핵심] 이전 재고를 기반으로 '그 당시의 BAR'를 다시 역산해냄
+                    # (DB에 BAR가 저장안되어 있어도 재고만 있으면 그 당시 요금을 알 수 있음)
                     _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
@@ -186,14 +195,18 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
+                # 3단 배치
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
+                # 예약 변화량 = 이전 재고 - 현재 재고
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
                 pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
+                
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
+                
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
                     content = f"+{pickup:.0f}"
@@ -203,16 +216,21 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = "-"
             
             elif mode == "판도변화":
+                # [판도 변화 핵심] 재고가 변해서 -> BAR 등급이 달라졌을 때만 색깔 표시
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
-                else: content = bar
+                else: 
+                    # 같으면 흰색 유지
+                    content = bar
             
             elif mode == "판매가":
                 after_disc = base_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 content = f"<b>{final_p:,}</b>"
+                
+                # 판매가도 판도가 변했을 때만 강조
                 if prev_bar and prev_bar != bar:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
@@ -266,27 +284,31 @@ if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
 
 with st.sidebar:
-    st.header("📅 수정 내역 조회")
+    st.header("📅 수정 내역 조회 (History)")
     work_day = st.date_input("조회 날짜", value=date.today())
-    if st.button("📂 과거 기록 보기"):
+    if st.button("📂 과거 기록 불러오기"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
         for doc in docs:
             d_dict = doc.to_dict()
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
-            if not st.session_state.today_df.empty:
+            if not st.session_state.today_df.empty and 'Date' in st.session_state.today_df.columns:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
+            
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
-                if not st.session_state.prev_df.empty:
+                if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
                     st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
-            else: st.session_state.prev_df = pd.DataFrame()
+            else:
+                st.session_state.prev_df = pd.DataFrame()
+
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
+            
             st.session_state.compare_label = f"불러온 과거 기록: {work_day}"
             found = True
-        if found: st.success("로드 완료")
+        if found: st.success("역사적 스냅샷 로드 완료")
         else: st.warning("데이터 없음")
 
     st.divider()
@@ -304,14 +326,32 @@ with st.sidebar:
                 st.session_state.channel_list.remove(ch)
                 st.session_state.promotions.pop(ch, None)
                 save_channel_configs(); st.rerun()
+            
             st.info("표에서 바로 수정/추가/삭제 하세요.")
             current_items = st.session_state.promotions[ch].get("items", [])
             df_editor = pd.DataFrame(current_items)
-            if df_editor.empty: df_editor = pd.DataFrame(columns=["객실타입", "상품명", "할인(%)", "추가금"])
-            edited_df = st.data_editor(df_editor, num_rows="dynamic", column_config={"객실타입": st.column_config.SelectboxColumn(options=ALL_ROOMS, required=True), "상품명": st.column_config.TextColumn(required=True), "할인(%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=1), "추가금": st.column_config.NumberColumn(step=1000, format="%d")}, key=f"editor_{ch}", use_container_width=True)
+            
+            if df_editor.empty:
+                df_editor = pd.DataFrame(columns=["객실타입", "상품명", "할인(%)", "추가금"])
+
+            edited_df = st.data_editor(
+                df_editor,
+                num_rows="dynamic",
+                column_config={
+                    "객실타입": st.column_config.SelectboxColumn(options=ALL_ROOMS, required=True),
+                    "상품명": st.column_config.TextColumn(required=True),
+                    "할인(%)": st.column_config.NumberColumn(min_value=0, max_value=100, step=1),
+                    "추가금": st.column_config.NumberColumn(step=1000, format="%d")
+                },
+                key=f"editor_{ch}",
+                use_container_width=True
+            )
+
             if st.button(f"💾 {ch} 설정 저장", key=f"save_{ch}"):
-                st.session_state.promotions[ch]["items"] = edited_df.to_dict(orient="records")
-                save_channel_configs(); st.success("저장 완료!")
+                updated_items = edited_df.to_dict(orient="records")
+                st.session_state.promotions[ch]["items"] = updated_items
+                save_channel_configs()
+                st.success("저장 완료!")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (부분 수정 가능)", accept_multiple_files=True)
@@ -332,46 +372,60 @@ with st.sidebar:
                 "saved_promotions": st.session_state.promotions,
                 "saved_channel_list": st.session_state.channel_list
             })
-            st.success("전체(수정분 포함) 저장 완료!")
+            st.success("저장 완료!")
 
-# --- 7. 파일 로직 (부분 수정 및 지능적 병합) ---
+# --- 7. 파일 로직 (스마트 병합) ---
 if files:
     new_extracted = []
     ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
+
     for f in files:
+        date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
+        
         for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
                 for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                     d_obj = robust_date_parser(d_val)
                     if d_obj is None: continue
-                    new_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot})
+                    new_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot, "Tag": date_tag})
 
     if new_extracted:
         new_df = pd.DataFrame(new_extracted)
         
-        # [핵심 로직: Merge] DB 최신본을 가져와서 오늘 올린 수정분과 합침
-        latest_db, save_dt = get_latest_snapshot()
+        # 파일이 2개 이상이면 파일끼리 비교는 제거하고, 
+        # 사용자가 올린 모든 파일을 하나로 합쳐서 '오늘 데이터(new_df)'로 간주함
         
-        if not latest_db.empty:
-            # 기존 DB 데이터를 베이스로 깔고, 오늘 올린 날짜/객실 데이터만 덮어씌움
-            # (두 테이블을 합친 뒤 날짜/객실 기준으로 중복 제거 시 '새로운 것'만 남김)
-            combined = pd.concat([new_df, latest_db]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
-            st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
-            
-            # 비교 대상(Prev)은 수정 전의 DB 상태 그대로 유지
-            st.session_state.prev_df = latest_db
-            st.session_state.compare_label = f"자동 부분 수정 비교 (기준: {save_dt})"
+        # [핵심] 사이드바에서 로드된 prev_df가 없으면 -> DB에서 가져옴
+        if st.session_state.prev_df.empty:
+            latest_db, save_dt = get_latest_snapshot()
+            if not latest_db.empty:
+                # [스마트 병합] 기존 DB + 새 파일 덮어쓰기
+                # (중복 시 keep='first' -> concat 순서 중요: new가 앞에 와야 함)
+                combined = pd.concat([new_df, latest_db]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+                st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
+                st.session_state.prev_df = latest_db
+                st.session_state.compare_label = f"자동 DB 병합/비교: {save_dt} 기준"
+            else:
+                st.session_state.today_df = new_df
+                st.session_state.prev_df = pd.DataFrame()
+                st.session_state.compare_label = "비교 대상 없음 (신규)"
         else:
-            st.session_state.today_df = new_df
-            st.session_state.compare_label = "비교 대상 없음 (신규)"
+            # 사이드바에서 불러온게 있으면 그걸 유지 (History 모드)
+            # 오늘 올린 파일과 합칠지 말지는 선택 사항이나, 보통 불러온 내역에 수정을 가하는 것이므로 병합
+            combined = pd.concat([new_df, st.session_state.today_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+            st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
+            # prev_df는 그대로 유지 (불러온 그 시점의 과거 데이터)
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
-    if st.session_state.compare_label: st.info(f"ℹ️ {st.session_state.compare_label}")
+    
+    if st.session_state.compare_label:
+        st.info(f"ℹ️ {st.session_state.compare_label}")
+        
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
