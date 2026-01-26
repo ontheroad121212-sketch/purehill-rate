@@ -102,11 +102,9 @@ def determine_bar(season, is_weekend, occ):
 
 def get_final_values(room_id, date_obj, avail, total):
     type_code, season, is_weekend = get_season_details(date_obj)
-    # [계산] 재고(Avail)가 변하면 -> OCC가 변하고 -> BAR가 변함 (핵심 연결고리)
     try: current_avail = float(avail) if pd.notna(avail) else 0.0
     except: current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
-    
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
@@ -136,7 +134,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         col_width_style = ""
 
     if mode == "판매가" and not items_to_show:
-        return f"<div style='padding:10px; color:gray;'>👉 왼쪽 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
+        return f"<div style='padding:10px; color:gray;'>👉 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
 
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
@@ -168,26 +166,19 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         
         for d in dates:
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
-            
-            # [수정] 빈 값도 칸 유지
             if curr_match.empty:
                 html += f"<td style='border:1px solid #ddd; padding:{row_padding}; text-align:center;'>-</td>"
                 continue
 
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            
-            # 1. 오늘 재고 기반으로 BAR/요금/OCC 계산
             occ, bar, base_price = get_final_values(rid, d, avail, total)
             
-            # 2. 이전 데이터(Prev) 불러오기
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
-                    # [핵심] 이전 재고를 기반으로 '그 당시의 BAR'를 다시 역산해냄
-                    # (DB에 BAR가 저장안되어 있어도 재고만 있으면 그 당시 요금을 알 수 있음)
                     _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
@@ -195,18 +186,14 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
-                # 3단 배치
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
-                # 예약 변화량 = 이전 재고 - 현재 재고
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
                 pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
-                
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
-                
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
                     content = f"+{pickup:.0f}"
@@ -216,8 +203,12 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = "-"
             
             elif mode == "판도변화":
-                # [판도 변화 핵심] 재고가 변해서 -> BAR 등급이 달라졌을 때만 색깔 표시
-                if prev_bar and prev_bar != bar:
+                # [판도 변화 로직 강화] 공백 제거 및 엄격 비교
+                curr_b_str = str(bar).strip() if bar else ""
+                prev_b_str = str(prev_bar).strip() if prev_bar else ""
+                
+                # 이전 데이터가 있고, 값이 다를 때만 색칠
+                if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
@@ -230,8 +221,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 content = f"<b>{final_p:,}</b>"
                 
-                # 판매가도 판도가 변했을 때만 강조
-                if prev_bar and prev_bar != bar:
+                curr_b_str = str(bar).strip() if bar else ""
+                prev_b_str = str(prev_bar).strip() if prev_bar else ""
+                
+                if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
 
@@ -395,15 +388,11 @@ if files:
     if new_extracted:
         new_df = pd.DataFrame(new_extracted)
         
-        # 파일이 2개 이상이면 파일끼리 비교는 제거하고, 
-        # 사용자가 올린 모든 파일을 하나로 합쳐서 '오늘 데이터(new_df)'로 간주함
-        
         # [핵심] 사이드바에서 로드된 prev_df가 없으면 -> DB에서 가져옴
         if st.session_state.prev_df.empty:
             latest_db, save_dt = get_latest_snapshot()
             if not latest_db.empty:
                 # [스마트 병합] 기존 DB + 새 파일 덮어쓰기
-                # (중복 시 keep='first' -> concat 순서 중요: new가 앞에 와야 함)
                 combined = pd.concat([new_df, latest_db]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
                 st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
                 st.session_state.prev_df = latest_db
@@ -413,11 +402,9 @@ if files:
                 st.session_state.prev_df = pd.DataFrame()
                 st.session_state.compare_label = "비교 대상 없음 (신규)"
         else:
-            # 사이드바에서 불러온게 있으면 그걸 유지 (History 모드)
-            # 오늘 올린 파일과 합칠지 말지는 선택 사항이나, 보통 불러온 내역에 수정을 가하는 것이므로 병합
+            # 사이드바에서 불러온게 있으면 그걸 유지
             combined = pd.concat([new_df, st.session_state.today_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
             st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
-            # prev_df는 그대로 유지 (불러온 그 시점의 과거 데이터)
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
