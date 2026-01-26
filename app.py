@@ -102,7 +102,13 @@ def determine_bar(season, is_weekend, occ):
 
 def get_final_values(room_id, date_obj, avail, total):
     type_code, season, is_weekend = get_season_details(date_obj)
-    occ = ((total - avail) / total * 100) if total > 0 else 0
+    
+    # [안전장치] avail이 None이거나 비어있으면 0.0으로 처리
+    try: current_avail = float(avail) if pd.notna(avail) else 0.0
+    except: current_avail = 0.0
+        
+    occ = ((total - current_avail) / total * 100) if total > 0 else 0
+    
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
@@ -164,7 +170,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         
         for d in dates:
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            
+            # [수정] 값이 비어 있어도(empty) 날짜만 있으면 칸을 그림
             if curr_match.empty:
+                # 데이터가 아예 없는 날짜라도 "-" 표시하여 칸 유지
                 html += f"<td style='border:1px solid #ddd; padding:{row_padding}; text-align:center;'>-</td>"
                 continue
 
@@ -174,7 +183,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
-                # [수정] 날짜 매칭이 정확히 되는지 확인
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
@@ -188,18 +196,20 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
-                # [수정] 이전 데이터가 없으면 변화량은 0 (혹은 - 표시)
-                pickup = (prev_avail - avail) if prev_avail is not None else 0
+                # 안전하게 숫자 변환
+                curr_av_safe = float(avail) if pd.notna(avail) else 0.0
+                prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
+                
+                pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
                 bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
                 style += f"background-color: {bg};"
                 
-                # pickup이 0이 아니면 표시
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
-                    content = f"+{pickup}"
+                    content = f"+{pickup:.0f}"
                 elif pickup < 0:
                     style += "color:blue; font-weight:bold;"
-                    content = f"{pickup}"
+                    content = f"{pickup:.0f}"
                 else: content = "-"
             
             elif mode == "판도변화":
@@ -251,7 +261,6 @@ def get_latest_snapshot():
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
-        # [중요 수정] 불러온 즉시 날짜 형식 강제 통일 (시간 제거)
         if not df.empty and 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
@@ -275,12 +284,10 @@ with st.sidebar:
         for doc in docs:
             d_dict = doc.to_dict()
             
-            # [핀셋 수정] 불러온 데이터(today_df)의 날짜 형식도 확실하게 Date로 변환
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
             if not st.session_state.today_df.empty and 'Date' in st.session_state.today_df.columns:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
             
-            # [핀셋 수정] 비교 데이터(prev_df)도 날짜 변환
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
@@ -375,25 +382,20 @@ if files:
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
                 for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
                     d_obj = robust_date_parser(d_val)
-                    if d_obj is None or pd.isna(av): continue
+                    # [🔴 핵심 수정] 데이터가 비어있어도(NaN) 날짜만 있으면 Skip 안 함
+                    if d_obj is None: continue
                     all_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot, "Tag": date_tag})
 
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
         tags = sorted(full_df['Tag'].unique())
         
-        # 1. 파일이 2개 이상 (파일끼리 비교)
         if len(tags) >= 2:
             st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
             st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
             st.session_state.compare_label = f"파일 간 비교: {tags[-2]} vs {tags[-1]}"
-        
-        # 2. 파일이 1개 (DB 또는 로드된 데이터와 비교)
         else:
             st.session_state.today_df = full_df.copy()
-            
-            # [핵심] 사이드바에서 로드된 prev_df가 없으면 -> DB에서 가져옴
-            # 로드된게 있으면 -> 그대로 둠 (덮어쓰기 방지)
             if st.session_state.prev_df.empty:
                 latest_df, save_dt = get_latest_snapshot()
                 if not latest_df.empty:
@@ -401,7 +403,7 @@ if files:
                     st.session_state.compare_label = f"자동 DB 비교: {save_dt} 저장본"
                 else:
                     st.session_state.prev_df = pd.DataFrame()
-                    st.session_state.compare_label = "비교 대상 없음 (신규)"
+                    st.session_state.compare_label = "비교 대상 없음"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
