@@ -111,7 +111,7 @@ def get_final_values(room_id, date_obj, avail, total):
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price
 
-# --- 4. 렌더러 (핀셋 조정: 1번 통 3단 수직 배치) ---
+# --- 4. 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
@@ -184,7 +184,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
                 style += f"background-color: {bg};"
-                # [수정] 3단 수직 배치 (BAR / 금액 / OCC)
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
@@ -248,6 +247,7 @@ def get_latest_snapshot():
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
+        # [중요] 날짜 객체 변환 강제
         if not df.empty and 'Date' in df.columns:
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
@@ -270,10 +270,13 @@ with st.sidebar:
         found = False
         for doc in docs:
             d_dict = doc.to_dict()
+            
+            # [핀셋 조정 1] 로드된 데이터 세션 저장
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
             if not st.session_state.today_df.empty:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
             
+            # [핀셋 조정 2] 저장된 Prev_Data 불러올 때도 날짜 변환 필수
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
@@ -284,7 +287,8 @@ with st.sidebar:
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
-            st.session_state.compare_label = f"과거 조회: {work_day}"
+            
+            st.session_state.compare_label = f"불러온 과거 기록: {work_day}"
             found = True
         if found: st.success("로드 완료")
         else: st.warning("데이터 없음")
@@ -352,7 +356,7 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 7. 파일 로직 ---
+# --- 7. 파일 로직 (핀셋 조정: 파일끼리 비교 삭제, 자동 로드만 수행) ---
 if files:
     all_extracted = []
     ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
@@ -372,20 +376,21 @@ if files:
 
     if all_extracted:
         full_df = pd.DataFrame(all_extracted)
+        # [수정] 파일 개수 무관하게 무조건 최신 태그를 '오늘 데이터'로 사용
         tags = sorted(full_df['Tag'].unique())
-        if len(tags) >= 2:
-            st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
-            st.session_state.prev_df = full_df[full_df['Tag'] == tags[-2]].copy()
-            st.session_state.compare_label = f"파일 간 비교: {tags[-2]} vs {tags[-1]}"
-        else:
-            st.session_state.today_df = full_df.copy()
+        st.session_state.today_df = full_df[full_df['Tag'] == tags[-1]].copy()
+        
+        # [핵심] 사용자가 사이드바에서 이미 로드한 데이터가 있으면 덮어쓰지 않음
+        # 로드한 데이터가 없을 때만 DB 최신본을 자동으로 가져옴
+        if st.session_state.prev_df.empty:
             latest_df, save_dt = get_latest_snapshot()
             if not latest_df.empty:
                 st.session_state.prev_df = latest_df
                 st.session_state.compare_label = f"자동 DB 비교: {save_dt} 저장본"
             else:
+                # DB도 비었으면 비교 안 함 (색 변화 없음, 흰색 출력)
                 st.session_state.prev_df = pd.DataFrame()
-                st.session_state.compare_label = "비교 대상 없음"
+                st.session_state.compare_label = "비교 대상 없음 (신규)"
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
