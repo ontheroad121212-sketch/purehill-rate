@@ -190,30 +190,26 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             
-            # 수동 오버라이드 확인
+            # [핵심 로직] mode가 "판매가"일 때만 manual_bar를 가져오고, 나머지는 시스템 원본 사용
             override_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-            manual_bar = st.session_state.get('manual_bars', {}).get(override_key)
-            occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, manual_bar)
+            m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
+            occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, m_bar)
             
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
-                    prev_override = st.session_state.get('manual_bars', {}).get(override_key)
-                    _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], prev_override)
+                    p_m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
+                    _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], p_m_bar)
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
             
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
                 style += f"background-color: {bg};"
-                # 수동 조작된 경우 눈에 띄게 강조
-                if is_manual:
-                    style += "border: 2.5px solid #FF0000; color: black; box-shadow: inset 0 0 5px rgba(255,0,0,0.5);"
-                    content = f"<b><span style='color:#FF9800; text-shadow: 0.5px 0.5px 1px #000;'>⭐</span> {bar}</b><br>{base_price:,}<br>{occ:.0f}%"
-                else:
-                    content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                # 기준 모드에서는 원본 데이터 표시만 수행 (is_manual 분기 제거)
+                content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
@@ -240,11 +236,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: 
                     content = bar
                     
-                # 판도 변화에서도 수동 조작 표기
-                if is_manual:
-                    style += "border: 2px dashed #FF0000;"
-                    content = f"⭐ {content}"
-            
             elif mode == "판매가":
                 try:
                     b_price = float(base_price) if base_price is not None else 0
@@ -264,6 +255,11 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
+                
+                # 판매가 산출 모드에서만 수동 조작 표기
+                if is_manual:
+                    style += "border: 2px dashed #FF0000;"
+                    content = f"⭐ {content}"
 
             html += f"<td style='{style}'>{content}</td>"
         html += "</tr>"
@@ -468,39 +464,38 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-    # === [핵심 변경] 판도 변화 바로 아래에 똑같이 생긴 매트릭스 형태의 에디터 배치 ===
-    st.markdown("### 🛠️ 판도 직접 수정 (Matrix Editor)")
-    st.write("위의 '판도 변화' 표와 동일한 구조입니다. 빈칸을 클릭해 `BAR0`, `BAR1` 등을 직접 입력하고 저장하세요.")
-    
-    dates_list = sorted(st.session_state.today_df['Date'].unique())
-    matrix_data = []
-    
-    # 표 모양으로 데이터 재조립 (가로: 날짜, 세로: 객실)
-    for rid in ALL_ROOMS:
-        row_data = {"객실": rid}
-        for d in dates_list:
-            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-            row_data[d.strftime('%m-%d')] = st.session_state.get('manual_bars', {}).get(o_key, "")
-        matrix_data.append(row_data)
+    # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
+    with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
+        st.write("※ 여기서 수정한 내용은 오직 하단의 '✅ 판매가 산출' 표와 엑셀 다운로드에만 반영되며, 상단의 시장 분석 데이터는 원본 시스템 계산값을 유지합니다.")
+        dates_list = sorted(st.session_state.today_df['Date'].unique())
+        matrix_data = []
         
-    ed_df = pd.DataFrame(matrix_data)
-    
-    # 에디터 UI 적용 (객실명 수정 불가 처리)
-    col_config = {"객실": st.column_config.TextColumn(disabled=True)}
-    edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
-    
-    if st.button("💾 수동 BAR 일괄 적용 및 새로고침", use_container_width=True):
-        new_manual_bars = {}
-        for idx, row in edited_matrix.iterrows():
-            rid = row["객실"]
+        # 표 모양으로 데이터 재조립 (가로: 날짜, 세로: 객실)
+        for rid in ALL_ROOMS:
+            row_data = {"객실": rid}
             for d in dates_list:
-                val = str(row[d.strftime('%m-%d')]).strip()
-                if val and val.upper() not in ["NONE", "NAN", ""]:
-                    key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                    new_manual_bars[key] = val.upper()
-        st.session_state.manual_bars = new_manual_bars
-        st.success("수동 오버라이드 일괄 적용 완료! 차트가 즉시 업데이트 됩니다.")
-        st.rerun()
+                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                row_data[d.strftime('%m-%d')] = st.session_state.get('manual_bars', {}).get(o_key, "")
+            matrix_data.append(row_data)
+            
+        ed_df = pd.DataFrame(matrix_data)
+        
+        # 에디터 UI 적용 (객실명 수정 불가 처리)
+        col_config = {"객실": st.column_config.TextColumn(disabled=True)}
+        edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
+        
+        if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
+            new_manual_bars = {}
+            for idx, row in edited_matrix.iterrows():
+                rid = row["객실"]
+                for d in dates_list:
+                    val = str(row[d.strftime('%m-%d')]).strip()
+                    if val and val.upper() not in ["NONE", "NAN", ""]:
+                        key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                        new_manual_bars[key] = val.upper()
+            st.session_state.manual_bars = new_manual_bars
+            st.success("수동 오버라이드가 하단 판매가 리포트에 적용되었습니다.")
+            st.rerun()
 
     st.divider()
 
@@ -520,6 +515,7 @@ if not st.session_state.today_df.empty:
             d = row['Date']
             rid = row['RoomID']
             o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+            # 엑셀 다운로드에는 관리자가 수동으로 개입한 최종 전략 값이 반영되도록 설정
             m_bar = st.session_state.get('manual_bars', {}).get(o_key)
             occ, bar, b_price, is_man = get_final_values(rid, d, row['Available'], row['Total'], m_bar)
             export_data.append({
