@@ -5,6 +5,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 import re
+import io  # 엑셀 다운로드를 위해 추가됨
 
 # --- 1. 파이버베이스 초기화 ---
 if not firebase_admin._apps:
@@ -18,10 +19,12 @@ db = firestore.client()
 
 # --- 2. 전역 설정 데이터 ---
 BAR_GRADIENT_COLORS = {
+    "BAR0": "#B71C1C", # 수동 인상 (가장 눈에 띄는 진한 빨강)
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
 }
 BAR_LIGHT_COLORS = {
+    "BAR0": "#FFCDD2", 
     "BAR1": "#FFEBEE", "BAR2": "#FFEBEE", "BAR3": "#FFF3E0", "BAR4": "#FFF3E0",
     "BAR5": "#E8F5E9", "BAR6": "#E8F5E9", "BAR7": "#F1F8E9", "BAR8": "#F1F8E9",
 }
@@ -31,11 +34,11 @@ FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
 PRICE_TABLE = {
-    "FDB": {"BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
-    "FDE": {"BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
-    "HDP": {"BAR8": 280000, "BAR7": 318000, "BAR6": 361000, "BAR5": 410000, "BAR4": 467000, "BAR3": 532000, "BAR2": 607000, "BAR1": 693000},
-    "HDT": {"BAR8": 250000, "BAR7": 288000, "BAR6": 331000, "BAR5": 380000, "BAR4": 437000, "BAR3": 502000, "BAR2": 577000, "BAR1": 663000},
-    "HDF": {"BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
+    "FDB": {"BAR0": 802000, "BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
+    "FDE": {"BAR0": 839000, "BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
+    "HDP": {"BAR0": 759000, "BAR8": 280000, "BAR7": 318000, "BAR6": 361000, "BAR5": 410000, "BAR4": 467000, "BAR3": 532000, "BAR2": 607000, "BAR1": 693000},
+    "HDT": {"BAR0": 729000, "BAR8": 250000, "BAR7": 288000, "BAR6": 331000, "BAR5": 380000, "BAR4": 437000, "BAR3": 502000, "BAR2": 577000, "BAR1": 663000},
+    "HDF": {"BAR0": 916000, "BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 298000, "UND2": 298000, "MID1": 298000, "MID2": 298000, "UPP1": 298000, "UPP2": 298000},
@@ -44,6 +47,8 @@ FIXED_PRICE_TABLE = {
     "FPT": {"UND1": 500000, "UND2": 550000, "MID1": 600000, "MID2": 650000, "UPP1": 700000, "UPP2": 750000},
     "PPV": {"UND1": 1104000, "UND2": 1154000, "MID1": 1154000, "MID2": 1304000, "UPP1": 1304000, "UPP2": 1554000},
 }
+# FIXED 객실용 수동 BAR0 가격 테이블 추가
+FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, "PPV": 1704000}
 
 # --- 3. 로직 함수 ---
 def get_season_details(date_obj):
@@ -100,18 +105,30 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 31: return "BAR7"
             else: return "BAR8"
 
-def get_final_values(room_id, date_obj, avail, total):
+def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
     type_code, season, is_weekend = get_season_details(date_obj)
     try: current_avail = float(avail) if pd.notna(avail) else 0.0
     except: current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
+    
+    # [핵심] 수동 오버라이드 로직 처리
+    if manual_bar:
+        bar = manual_bar
+        if bar == "BAR0":
+            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
+            else: price = FIXED_BAR0_TABLE.get(room_id, 0)
+        else:
+            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
+            else: price = FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+        return occ, bar, price, True # is_manual = True
+
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
     else:
         bar = type_code
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
-    return occ, bar, price
+    return occ, bar, price, False # is_manual = False
 
 # --- 4. 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
@@ -172,27 +189,37 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            occ, bar, base_price = get_final_values(rid, d, avail, total)
+            
+            # 수동 오버라이드 확인
+            override_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+            manual_bar = st.session_state.get('manual_bars', {}).get(override_key)
+            occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, manual_bar)
             
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
-                    _, prev_bar, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'])
+                    prev_override = st.session_state.get('manual_bars', {}).get(override_key)
+                    _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], prev_override)
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
             
             if mode == "기준":
-                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#F1F1F1"
+                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
                 style += f"background-color: {bg};"
-                content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                # 수동 조작된 경우 눈에 띄게 강조
+                if is_manual:
+                    style += "border: 2.5px solid #FF0000; color: black; box-shadow: inset 0 0 5px rgba(255,0,0,0.5);"
+                    content = f"<b><span style='color:#FF9800; text-shadow: 0.5px 0.5px 1px #000;'>⭐</span> {bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                else:
+                    content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
                 pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
-                bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS else "#FFFFFF"
+                bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#FFFFFF"
                 style += f"background-color: {bg};"
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
@@ -203,38 +230,34 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = "-"
             
             elif mode == "판도변화":
-                # [판도 변화 로직 강화] 공백 제거 및 엄격 비교
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 
-                # 이전 데이터가 있고, 값이 다를 때만 색칠
                 if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
                 else: 
-                    # 같으면 흰색 유지
                     content = bar
+                    
+                # 판도 변화에서도 수동 조작 표기
+                if is_manual:
+                    style += "border: 2px dashed #FF0000;"
+                    content = f"⭐ {content}"
             
             elif mode == "판매가":
                 try:
-                    # [데이터 방어] None이나 문자열이 들어올 경우를 대비해 숫자로 변환
                     b_price = float(base_price) if base_price is not None else 0
                     d_rate = float(discount) if discount is not None else 0
                     a_price = float(add_price) if add_price is not None else 0
                     
-                    # 1. 할인 적용가 계산
                     after_disc = b_price * (1 - (d_rate / 100))
-                    
-                    # 2. 1,000원 단위 절사(floor) 후 추가 금액 합산
                     final_p = int((math.floor(after_disc / 1000) * 1000) + a_price)
                     content = f"<b>{final_p:,}</b>"
                     
                 except (ValueError, TypeError, ZeroDivisionError):
-                    # 데이터가 없거나 계산이 불가능한 경우 '-'로 표시하여 에러 방지
                     content = "<b>-</b>"
 
-                # BAR(기준가) 변경 감지 및 스타일링 로직
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 
@@ -242,7 +265,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
 
-            # 생성된 content를 테이블 셀에 삽입
             html += f"<td style='{style}'>{content}</td>"
         html += "</tr>"
     html += "</tbody></table></div>"
@@ -290,9 +312,20 @@ if 'channel_list' not in st.session_state: load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
+if 'manual_bars' not in st.session_state: st.session_state.manual_bars = {} # 수동 오버라이드 상태
 
 with st.sidebar:
     st.header("📅 수정 내역 조회 (History)")
+    
+    # [캘린더 표기 로직] 업데이트된 일자들을 가져와서 달력 위에 표시
+    try:
+        all_docs = db.collection("daily_snapshots").select(["work_date"]).stream()
+        saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
+        if saved_dates:
+            st.info("📌 기록이 존재하는 날짜:\n" + ", ".join(saved_dates[-7:]))
+    except Exception:
+        pass
+
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
         docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
@@ -314,10 +347,13 @@ with st.sidebar:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
             
+            # 수동 바 로드
+            st.session_state.manual_bars = d_dict.get('saved_manual_bars', {})
+            
             st.session_state.compare_label = f"불러온 과거 기록: {work_day}"
             found = True
         if found: st.success("역사적 스냅샷 로드 완료")
-        else: st.warning("데이터 없음")
+        else: st.warning("해당 날짜의 데이터가 없습니다.")
 
     st.divider()
     st.header("🎯 채널 & 상품 관리 (이지 에디터)")
@@ -359,7 +395,7 @@ with st.sidebar:
                 updated_items = edited_df.to_dict(orient="records")
                 st.session_state.promotions[ch]["items"] = updated_items
                 save_channel_configs()
-                st.success("저장 완료!")
+                st.success("저장 완료! 표에 즉시 반영됩니다.")
 
     st.divider()
     files = st.file_uploader("리포트 업로드 (부분 수정 가능)", accept_multiple_files=True)
@@ -378,7 +414,8 @@ with st.sidebar:
                 "data": t_df.to_dict(orient='records'),
                 "prev_data": p_df_dict,
                 "saved_promotions": st.session_state.promotions,
-                "saved_channel_list": st.session_state.channel_list
+                "saved_channel_list": st.session_state.channel_list,
+                "saved_manual_bars": st.session_state.manual_bars # 수동 저장 내역 포함
             })
             st.success("저장 완료!")
 
@@ -403,11 +440,9 @@ if files:
     if new_extracted:
         new_df = pd.DataFrame(new_extracted)
         
-        # [핵심] 사이드바에서 로드된 prev_df가 없으면 -> DB에서 가져옴
         if st.session_state.prev_df.empty:
             latest_db, save_dt = get_latest_snapshot()
             if not latest_db.empty:
-                # [스마트 병합] 기존 DB + 새 파일 덮어쓰기
                 combined = pd.concat([new_df, latest_db]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
                 st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
                 st.session_state.prev_df = latest_db
@@ -417,7 +452,6 @@ if files:
                 st.session_state.prev_df = pd.DataFrame()
                 st.session_state.compare_label = "비교 대상 없음 (신규)"
         else:
-            # 사이드바에서 불러온게 있으면 그걸 유지
             combined = pd.concat([new_df, st.session_state.today_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
             st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
 
@@ -433,3 +467,69 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
     for ch in st.session_state.channel_list:
         st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
+
+    st.divider()
+    
+    # --- 엑셀 다운로드 기능 ---
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.subheader("📥 데이터 엑셀 다운로드")
+        st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 다운로드합니다.")
+        
+        def generate_excel():
+            output = io.BytesIO()
+            export_data = []
+            for idx, row in st.session_state.today_df.iterrows():
+                d = row['Date']
+                rid = row['RoomID']
+                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                m_bar = st.session_state.get('manual_bars', {}).get(o_key)
+                occ, bar, b_price, is_man = get_final_values(rid, d, row['Available'], row['Total'], m_bar)
+                export_data.append({
+                    "날짜": d.strftime('%Y-%m-%d'),
+                    "객실타입": rid,
+                    "잔여객실": row['Available'],
+                    "전체객실": row['Total'],
+                    "점유율(%)": round(occ, 1),
+                    "적용BAR": bar,
+                    "판매가": b_price,
+                    "수동개입": "O" if is_man else ""
+                })
+            df_export = pd.DataFrame(export_data)
+            with pd.ExcelWriter(output) as writer:
+                df_export.to_excel(writer, index=False, sheet_name='시장분석데이터')
+            return output.getvalue()
+
+        st.download_button(
+            label="📊 엑셀 다운로드 실행",
+            data=generate_excel(),
+            file_name=f"AmberPureHill_Report_{date.today().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    # --- 수동 BAR 오버라이드 기능 ---
+    with col2:
+        st.subheader("🛠️ BAR 수동 오버라이드 (판도 임의 변경)")
+        st.write("아래에서 특정 날짜/객실에 'BAR0' 등을 직접 입력하고 저장하세요. 빈칸으로 두면 다시 자동으로 돌아갑니다.")
+        
+        dates_list = sorted(st.session_state.today_df['Date'].unique())
+        editor_rows = []
+        for d in dates_list:
+            for rid in ALL_ROOMS:
+                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                current_override = st.session_state.get('manual_bars', {}).get(o_key, "")
+                editor_rows.append({"날짜": d.strftime('%Y-%m-%d'), "객실": rid, "수동BAR입력": current_override})
+                
+        ed_df = pd.DataFrame(editor_rows)
+        edited_bars = st.data_editor(ed_df, use_container_width=True, hide_index=True, height=300)
+        
+        if st.button("💾 수동 BAR 적용 및 새로고침"):
+            new_manual_bars = {}
+            for idx, row in edited_bars.iterrows():
+                val = str(row["수동BAR입력"]).strip()
+                if val and val.upper() != "NONE":
+                    key = f"{row['날짜']}_{row['객실']}"
+                    new_manual_bars[key] = val.upper()
+            st.session_state.manual_bars = new_manual_bars
+            st.success("수동 오버라이드 적용 완료! 차트가 업데이트 됩니다.")
+            st.rerun()
