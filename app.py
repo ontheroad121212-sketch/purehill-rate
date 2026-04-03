@@ -317,12 +317,14 @@ if 'manual_bars' not in st.session_state: st.session_state.manual_bars = {} # �
 with st.sidebar:
     st.header("📅 수정 내역 조회 (History)")
     
-    # [캘린더 표기 로직] 업데이트된 일자들을 가져와서 달력 위에 표시
+    # [새로운 캘린더 시각화 로직] 업데이트된 일자들을 태그 형태로 직관적 표시
     try:
         all_docs = db.collection("daily_snapshots").select(["work_date"]).stream()
         saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
         if saved_dates:
-            st.info("📌 기록이 존재하는 날짜:\n" + ", ".join(saved_dates[-7:]))
+            st.markdown("**📌 데이터가 저장된 날짜 (최근 14일)**")
+            tags = "".join([f"<span style='background:#E8F5E9; border:1px solid #4CAF50; color:#2E7D32; padding:3px 8px; border-radius:12px; margin:2px; font-size:12px; display:inline-block; font-weight:bold;'>{d[5:]} ✅</span>" for d in saved_dates[-14:]])
+            st.markdown(f"<div style='margin-bottom: 10px;'>{tags}</div>", unsafe_allow_html=True)
     except Exception:
         pass
 
@@ -465,71 +467,79 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
+
+    # === [핵심 변경] 판도 변화 바로 아래에 똑같이 생긴 매트릭스 형태의 에디터 배치 ===
+    st.markdown("### 🛠️ 판도 직접 수정 (Matrix Editor)")
+    st.write("위의 '판도 변화' 표와 동일한 구조입니다. 빈칸을 클릭해 `BAR0`, `BAR1` 등을 직접 입력하고 저장하세요.")
+    
+    dates_list = sorted(st.session_state.today_df['Date'].unique())
+    matrix_data = []
+    
+    # 표 모양으로 데이터 재조립 (가로: 날짜, 세로: 객실)
+    for rid in ALL_ROOMS:
+        row_data = {"객실": rid}
+        for d in dates_list:
+            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+            row_data[d.strftime('%m-%d')] = st.session_state.get('manual_bars', {}).get(o_key, "")
+        matrix_data.append(row_data)
+        
+    ed_df = pd.DataFrame(matrix_data)
+    
+    # 에디터 UI 적용 (객실명 수정 불가 처리)
+    col_config = {"객실": st.column_config.TextColumn(disabled=True)}
+    edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
+    
+    if st.button("💾 수동 BAR 일괄 적용 및 새로고침", use_container_width=True):
+        new_manual_bars = {}
+        for idx, row in edited_matrix.iterrows():
+            rid = row["객실"]
+            for d in dates_list:
+                val = str(row[d.strftime('%m-%d')]).strip()
+                if val and val.upper() not in ["NONE", "NAN", ""]:
+                    key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                    new_manual_bars[key] = val.upper()
+        st.session_state.manual_bars = new_manual_bars
+        st.success("수동 오버라이드 일괄 적용 완료! 차트가 즉시 업데이트 됩니다.")
+        st.rerun()
+
+    st.divider()
+
     for ch in st.session_state.channel_list:
         st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
 
     st.divider()
     
     # --- 엑셀 다운로드 기능 ---
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.subheader("📥 데이터 엑셀 다운로드")
-        st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 다운로드합니다.")
-        
-        def generate_excel():
-            output = io.BytesIO()
-            export_data = []
-            for idx, row in st.session_state.today_df.iterrows():
-                d = row['Date']
-                rid = row['RoomID']
-                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                m_bar = st.session_state.get('manual_bars', {}).get(o_key)
-                occ, bar, b_price, is_man = get_final_values(rid, d, row['Available'], row['Total'], m_bar)
-                export_data.append({
-                    "날짜": d.strftime('%Y-%m-%d'),
-                    "객실타입": rid,
-                    "잔여객실": row['Available'],
-                    "전체객실": row['Total'],
-                    "점유율(%)": round(occ, 1),
-                    "적용BAR": bar,
-                    "판매가": b_price,
-                    "수동개입": "O" if is_man else ""
-                })
-            df_export = pd.DataFrame(export_data)
-            with pd.ExcelWriter(output) as writer:
-                df_export.to_excel(writer, index=False, sheet_name='시장분석데이터')
-            return output.getvalue()
+    st.subheader("📥 데이터 엑셀 다운로드")
+    st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 엑셀 파일로 다운로드합니다.")
+    
+    def generate_excel():
+        output = io.BytesIO()
+        export_data = []
+        for idx, row in st.session_state.today_df.iterrows():
+            d = row['Date']
+            rid = row['RoomID']
+            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+            m_bar = st.session_state.get('manual_bars', {}).get(o_key)
+            occ, bar, b_price, is_man = get_final_values(rid, d, row['Available'], row['Total'], m_bar)
+            export_data.append({
+                "날짜": d.strftime('%Y-%m-%d'),
+                "객실타입": rid,
+                "잔여객실": row['Available'],
+                "전체객실": row['Total'],
+                "점유율(%)": round(occ, 1),
+                "적용BAR": bar,
+                "판매가": b_price,
+                "수동개입": "O" if is_man else ""
+            })
+        df_export = pd.DataFrame(export_data)
+        with pd.ExcelWriter(output) as writer:
+            df_export.to_excel(writer, index=False, sheet_name='시장분석데이터')
+        return output.getvalue()
 
-        st.download_button(
-            label="📊 엑셀 다운로드 실행",
-            data=generate_excel(),
-            file_name=f"AmberPureHill_Report_{date.today().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    # --- 수동 BAR 오버라이드 기능 ---
-    with col2:
-        st.subheader("🛠️ BAR 수동 오버라이드 (판도 임의 변경)")
-        st.write("아래에서 특정 날짜/객실에 'BAR0' 등을 직접 입력하고 저장하세요. 빈칸으로 두면 다시 자동으로 돌아갑니다.")
-        
-        dates_list = sorted(st.session_state.today_df['Date'].unique())
-        editor_rows = []
-        for d in dates_list:
-            for rid in ALL_ROOMS:
-                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                current_override = st.session_state.get('manual_bars', {}).get(o_key, "")
-                editor_rows.append({"날짜": d.strftime('%Y-%m-%d'), "객실": rid, "수동BAR입력": current_override})
-                
-        ed_df = pd.DataFrame(editor_rows)
-        edited_bars = st.data_editor(ed_df, use_container_width=True, hide_index=True, height=300)
-        
-        if st.button("💾 수동 BAR 적용 및 새로고침"):
-            new_manual_bars = {}
-            for idx, row in edited_bars.iterrows():
-                val = str(row["수동BAR입력"]).strip()
-                if val and val.upper() != "NONE":
-                    key = f"{row['날짜']}_{row['객실']}"
-                    new_manual_bars[key] = val.upper()
-            st.session_state.manual_bars = new_manual_bars
-            st.success("수동 오버라이드 적용 완료! 차트가 업데이트 됩니다.")
-            st.rerun()
+    st.download_button(
+        label="📊 엑셀 다운로드 실행",
+        data=generate_excel(),
+        file_name=f"AmberPureHill_Report_{date.today().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
