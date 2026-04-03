@@ -217,9 +217,19 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     content = bar
             
             elif mode == "판매가":
-                after_disc = base_price * (1 - (discount / 100))
-                final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
-                content = f"<b>{final_p:,}</b>"
+                # [수정] 데이터가 비어있을 경우를 대비해 0으로 기본값 설정
+                try:
+                    b_price = float(base_price) if base_price is not None else 0
+                    d_rate = float(discount) if discount is not None else 0
+                    a_price = float(add_price) if add_price is not None else 0
+                    
+                    after_disc = b_price * (1 - (d_rate / 100))
+                    # 1000원 단위 절사 후 추가금액 합산
+                    final_p = int((math.floor(after_disc / 1000) * 1000) + a_price)
+                    content = f"<b>{final_p:,}</b>"
+                except (ValueError, TypeError):
+                    # 데이터 계산이 불가능한 경우 표시할 내용
+                    content = "<b>-</b>"
                 
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
@@ -227,11 +237,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
-
-            html += f"<td style='{style}'>{content}</td>"
-        html += "</tr>"
-    html += "</tbody></table></div>"
-    return html
 
 # --- 5. 파서 및 DB 로직 ---
 def robust_date_parser(d_val):
