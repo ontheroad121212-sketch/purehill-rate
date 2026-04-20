@@ -213,6 +213,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:{row_padding}; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1; {line_style}'>{label}</td>"
         
         for d in dates:
+            # 🚨 [버그 픽스] 여기서 date_str을 정의해 줘야 뒤에서 에러가 안 납니다!
+            date_str = d.strftime('%Y-%m-%d')
+            
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
                 html += f"<td style='border:1px solid #ddd; padding:{row_padding}; text-align:center;'>-</td>"
@@ -221,8 +224,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             
-            # [핵심 로직] mode가 "판매가"일 때만 manual_bar를 가져오고, 나머지는 시스템 원본 사용
-            override_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+            override_key = f"{date_str}_{rid}"
             m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
             occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, m_bar)
             
@@ -239,27 +241,27 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
                 style += f"background-color: {bg};"
-                # 기준 모드에서는 원본 데이터 표시만 수행 (is_manual 분기 제거)
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
                 
             elif mode == "최종결과":
-                # [핵심] 수동 적용 BAR가 있으면 그걸 1순위로 가져옴
                 applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
                 is_applied = applied_bar is not None
                 
-                # 최종적으로 화면에 표시할 BAR 결정
+                # 수동 개입이 있으면 final_bar로 교체
                 final_bar = applied_bar if is_applied else bar
                 final_price = get_bar_price(rid, final_bar) if is_applied else base_price
                 
-                # [수정] 배경색을 최종 결정된 final_bar 기준으로 가져오도록 변경!
+                curr_b_str = str(final_bar).strip() if final_bar else ""
+                prev_b_str = str(prev_bar).strip() if prev_bar else ""
+                is_trend_changed = (prev_bar is not None and prev_b_str != curr_b_str)
+                
+                # 🚨 [컬러 픽스] 최종 결정된 BAR 기준으로 배경색을 가져옴
                 bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
                 
                 if is_applied:
-                    # 수동 개입된 날은 굵은 초록 테두리와 별표(⭐)로 강조
                     style += f"background-color: {bg}; border: 3px solid #2E7D32; font-weight: bold;"
                     content = f"⭐ <b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
                 else:
-                    # 수동 개입 없는 날은 평소처럼 출력 (투명도 살짝 줘서 구분)
                     style += f"background-color: {bg}; opacity: 0.9;"
                     content = f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
             
@@ -308,7 +310,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
                 
-                # 판매가 산출 모드에서만 수동 조작 표기
                 if is_manual:
                     style += "border: 2px dashed #FF0000;"
                     content = f"⭐ {content}"
