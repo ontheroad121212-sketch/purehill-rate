@@ -448,82 +448,41 @@ def render_applied_vs_recommend_table(current_df, applied_rates):
 
 # --- 4-C. 요금 적용 UI (시장분석 형태) ---
 def render_apply_rate_ui(current_df, applied_rates):
-    """날짜 찍어서 요금 적용하는 에디터 - 시장분석 스타일"""
-    if current_df.empty:
-        return
-    
-    st.markdown("""
-    <div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; 
-                padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>
-        ⏰ 5. 요금 적용 (CMS 반영 기록)
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st.caption("🔧 시장분석처럼 격자 형태로 편집 → 수정 후 저장하면 CMS 적용 기록으로 저장됩니다.")
+    if current_df.empty: return
+    st.markdown("""<div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>⏰ 5. 전략적 요금 오버라이드 (CMS 수동 반영)</div>""", unsafe_allow_html=True)
+    st.caption("🔧 특정 일자의 요금을 시스템 권장과 다르게 강제로 묶거나 인상할 때 사용합니다.")
     
     all_dates_full = sorted(current_df['Date'].unique())
     today = date.today()
+    include_past = st.checkbox("📜 과거 날짜도 선택 가능하게 (기본: 오늘 이후만)", value=False, key="apply_include_past")
+    dates = all_dates_full if include_past else [d for d in all_dates_full if d >= today]
+    if not dates: return st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
     
-    # 적용 UI는 기본적으로 '오늘 이후'만 대상
-    include_past = st.checkbox(
-        "📜 과거 날짜도 선택 가능하게 (기본: 오늘 이후만)",
-        value=False,
-        key="apply_include_past"
-    )
-    
-    if include_past:
-        dates = all_dates_full
-    else:
-        dates = [d for d in all_dates_full if d >= today]
-    
-    if not dates:
-        st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
-        return
-    
-    # 빠른 날짜 선택
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        quick_select = st.selectbox(
-            "📅 빠른 날짜 선택",
-            ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 (필터된)", "직접 선택"],
-            key="apply_quick_select"
-        )
+        quick_select = st.selectbox("📅 빠른 날짜 선택", ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 (필터된)", "직접 선택"], key="apply_quick_select")
     
     preset_dates = []
     if quick_select == "이번 주 (월~일)":
         monday = today - timedelta(days=today.weekday())
-        sunday = monday + timedelta(days=6)
-        preset_dates = [d for d in dates if monday <= d <= sunday]
+        preset_dates = [d for d in dates if monday <= d <= monday + timedelta(days=6)]
     elif quick_select == "다음 주":
         monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
-        sunday = monday + timedelta(days=6)
-        preset_dates = [d for d in dates if monday <= d <= sunday]
+        preset_dates = [d for d in dates if monday <= d <= monday + timedelta(days=6)]
     elif quick_select == "이번 달 남은 날":
         preset_dates = [d for d in dates if d >= today and d.month == today.month]
     elif quick_select == "전체 (필터된)":
         preset_dates = list(dates)
     
-    selected_dates = st.multiselect(
-        "✅ 적용할 날짜 (여러 개 가능)",
-        options=dates,
-        default=preset_dates,
-        format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})",
-        key="apply_date_select"
-    )
+    selected_dates = st.multiselect("✅ 적용할 날짜 (여러 개 가능)", options=dates, default=preset_dates, format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})", key="apply_date_select")
+    if not selected_dates: return st.info("👆 위에서 날짜를 먼저 선택하세요.")
     
-    if not selected_dates:
-        st.info("👆 위에서 날짜를 먼저 선택하세요.")
-        return
-    
-    st.markdown(f"**선택됨: {len(selected_dates)}일**")
-    
-    # === 격자 에디터 ===
     bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
     
-    # 세션에 편집 중인 매트릭스 저장 (리셋 버튼용)
-    matrix_key = f"apply_matrix_data_{len(selected_dates)}"
+    # 🚨 [해결 1] 갯수만 보지 않고 '선택한 날짜' 자체를 키(Key)로 만들어 표가 무조건 새로 그려지도록 수정!
+    safe_date_str = "".join([d.strftime('%d') for d in selected_dates])
+    matrix_key = f"apply_matrix_data_{len(selected_dates)}_{safe_date_str}"
     
-    # 권장 BAR 맵 (비교용)
     rec_bar_map = {}
     for rid in DYNAMIC_ROOMS:
         for d in selected_dates:
@@ -531,14 +490,9 @@ def render_apply_rate_ui(current_df, applied_rates):
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             rec_bar = "BAR5"
             if not curr_match.empty:
-                _, rec_bar, _, _ = get_final_values(
-                    rid, d,
-                    curr_match.iloc[0]['Available'],
-                    curr_match.iloc[0]['Total']
-                )
+                _, rec_bar, _, _ = get_final_values(rid, d, curr_match.iloc[0]['Available'], curr_match.iloc[0]['Total'])
             rec_bar_map[(rid, date_str)] = rec_bar
     
-    # 초기값: 기존 applied_rates > 권장 BAR
     def build_initial_matrix():
         data = []
         for rid in DYNAMIC_ROOMS:
@@ -546,19 +500,13 @@ def render_apply_rate_ui(current_df, applied_rates):
             for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
                 col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-                # 기존 적용값 > 권장값
                 existing = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-                if existing:
-                    row_data[col_label] = existing
-                else:
-                    row_data[col_label] = rec_bar_map.get((rid, date_str), "BAR5")
+                row_data[col_label] = existing if existing else rec_bar_map.get((rid, date_str), "BAR5")
             data.append(row_data)
         return data
     
-    # 빠른 채우기 버튼
     st.markdown("**🔧 빠른 채우기**")
     btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
-    
     with btn_col1:
         if st.button("🎯 권장 BAR 전체 채우기", use_container_width=True, key="fill_recommended"):
             data = []
@@ -571,10 +519,8 @@ def render_apply_rate_ui(current_df, applied_rates):
                 data.append(row_data)
             st.session_state[matrix_key] = data
             st.rerun()
-    
     with btn_col2:
         bulk_bar = st.selectbox("일괄 BAR", bar_options, index=4, key="bulk_bar_select", label_visibility="collapsed")
-    
     with btn_col3:
         if st.button(f"⚡ 전체 {bulk_bar}로", use_container_width=True, key="fill_bulk"):
             data = []
@@ -586,124 +532,62 @@ def render_apply_rate_ui(current_df, applied_rates):
                 data.append(row_data)
             st.session_state[matrix_key] = data
             st.rerun()
-    
     with btn_col4:
         if st.button("🔄 저장된 값으로 리셋", use_container_width=True, key="reset_matrix"):
-            if matrix_key in st.session_state:
-                del st.session_state[matrix_key]
+            if matrix_key in st.session_state: del st.session_state[matrix_key]
             st.rerun()
     
-    # 현재 매트릭스 (세션에 있으면 사용, 없으면 초기값)
-    if matrix_key not in st.session_state:
-        st.session_state[matrix_key] = build_initial_matrix()
-    
+    if matrix_key not in st.session_state: st.session_state[matrix_key] = build_initial_matrix()
     matrix_df = pd.DataFrame(st.session_state[matrix_key])
     
-    # 컬럼 설정 (셀을 드롭다운으로)
     col_config = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
     for d in selected_dates:
         col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-        col_config[col_label] = st.column_config.SelectboxColumn(
-            options=bar_options,
-            required=True,
-            width="small"
-        )
+        col_config[col_label] = st.column_config.SelectboxColumn(options=bar_options, required=True, width="small")
     
-    st.markdown("### 📋 시장분석 형태 편집기")
-    st.caption("셀을 클릭해서 BAR 변경하세요. (가로: 날짜 / 세로: 객실)")
+    edited_matrix = st.data_editor(matrix_df, column_config=col_config, use_container_width=True, hide_index=True, key="apply_matrix_editor_v2")
     
-    edited_matrix = st.data_editor(
-        matrix_df,
-        column_config=col_config,
-        use_container_width=True,
-        hide_index=True,
-        key="apply_matrix_editor_v2"
-    )
-    
-    # 권장 BAR 참고 표
-    with st.expander("🎯 권장 BAR 참고 (시스템 자동 계산)", expanded=False):
-        rec_matrix = []
-        for rid in DYNAMIC_ROOMS:
-            rec_row = {"객실": rid}
-            for d in selected_dates:
-                date_str = d.strftime('%Y-%m-%d')
-                col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-                rec_row[col_label] = rec_bar_map.get((rid, date_str), "-")
-            rec_matrix.append(rec_row)
-        st.dataframe(pd.DataFrame(rec_matrix), use_container_width=True, hide_index=True)
-    
-    # applied_input에 반영
+    # 🚨 [해결 2] 표에서 값을 읽어올 때 못 찾더라도 앱이 뻗지 않도록 .get() 사용 (에러 철벽 방어)
     applied_input = {}
-    diff_count = 0
     for idx, row in edited_matrix.iterrows():
         rid = row["객실"]
         for d in selected_dates:
             date_str = d.strftime('%Y-%m-%d')
             col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-            bar_val = str(row[col_label]).strip().upper() if row[col_label] else None
+            
+            raw_val = row.get(col_label)
+            bar_val = str(raw_val).strip().upper() if raw_val and pd.notna(raw_val) else None
+            
             if bar_val and bar_val in bar_options:
-                if d not in applied_input:
-                    applied_input[d] = {}
+                if d not in applied_input: applied_input[d] = {}
                 applied_input[d][rid] = bar_val
-                # 권장과 차이 카운트
-                rec_val = rec_bar_map.get((rid, date_str))
-                if rec_val and bar_val != rec_val:
-                    diff_count += 1
     
-    # 상태 표시
-    if diff_count > 0:
-        st.warning(f"⚠️ 권장 BAR과 다른 값 **{diff_count}개** 있습니다. 저장 전 확인하세요.")
-    else:
-        st.success("✅ 모든 값이 권장 BAR과 일치합니다.")
+    memo = st.text_area("📝 메모 (툴팁 표시용)", placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함", key="apply_memo", height=70)
     
-    st.divider()
-    
-    # 메모
-    memo = st.text_area(
-        "📝 메모 (모든 선택된 날짜에 동일 적용)",
-        placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함",
-        key="apply_memo",
-        height=70
-    )
-    
-    # 저장/삭제 버튼
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("💾 선택한 날짜 모두 적용 저장", type="primary", use_container_width=True, key="apply_save_btn"):
-            success_count = 0
-            fail_count = 0
+            success_count, fail_count = 0, 0
             for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
-                rooms_data = applied_input.get(d, {})
-                if rooms_data:
-                    if save_applied_rate(date_str, rooms_data, memo):
-                        success_count += 1
-                    else:
-                        fail_count += 1
-            
+                if applied_input.get(d, {}):
+                    if save_applied_rate(date_str, applied_input[d], memo): success_count += 1
+                    else: fail_count += 1
             if success_count:
                 st.success(f"✅ {success_count}일 적용 완료!")
-                st.balloons()
-                # 매트릭스 세션 초기화 (다음에 새로 불러오도록)
-                if matrix_key in st.session_state:
-                    del st.session_state[matrix_key]
+                if matrix_key in st.session_state: del st.session_state[matrix_key]
                 st.rerun()
-            if fail_count:
-                st.error(f"❌ {fail_count}일 저장 실패")
-    
     with col2:
-        if st.button("🗑️ 적용 기록 삭제", use_container_width=True, key="apply_delete_btn"):
+        if st.button("🗑️ 선택일 적용 기록 해제", use_container_width=True, key="apply_delete_btn"):
             del_count = 0
             for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
-                if delete_applied_rate(date_str):
-                    del_count += 1
+                if delete_applied_rate(date_str): del_count += 1
             if del_count:
-                st.success(f"🗑️ {del_count}일 삭제됨")
-                if matrix_key in st.session_state:
-                    del st.session_state[matrix_key]
+                st.success(f"🗑️ {del_count}일 수동 적용 해제됨 (시스템 권장가로 원복)")
+                if matrix_key in st.session_state: del st.session_state[matrix_key]
                 st.rerun()
-
+                
 # --- 4-D. 채널 판매가 (적용가 기준) ---
 def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates):
     """채널별 판매가 - 판도 변화 및 수동 오버라이드 시각적 분리 적용"""
