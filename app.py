@@ -536,45 +536,94 @@ def render_apply_rate_ui(current_df, applied_rates):
         for d in selected_dates:
             applied_input[d] = {rid: unified_bar for rid in DYNAMIC_ROOMS}
     
-    else:  # "✏️ 날짜별 개별 지정"
-        st.info("💡 각 날짜마다 객실별 BAR을 직접 지정할 수 있습니다.")
+else:  # "✏️ 날짜별 개별 지정"
+        st.info("💡 시장분석 표처럼 한눈에 보면서 편집할 수 있어요. 빨간색은 권장 BAR과 다른 값.")
         bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
         
+        # 행: 객실, 열: 날짜
+        matrix_data = []
+        rec_bar_map = {}  # 권장 BAR 저장 (비교용)
+        
+        for rid in DYNAMIC_ROOMS:
+            row_data = {"객실": rid}
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                
+                # 권장 BAR 계산
+                curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                rec_bar = "BAR5"
+                if not curr_match.empty:
+                    _, rec_bar, _, _ = get_final_values(
+                        rid, d,
+                        curr_match.iloc[0]['Available'],
+                        curr_match.iloc[0]['Total']
+                    )
+                rec_bar_map[(rid, date_str)] = rec_bar
+                
+                # 기존 적용값 or 권장값
+                existing = applied_rates.get(date_str, {}).get('rooms', {}).get(rid, rec_bar)
+                row_data[col_label] = existing
+            matrix_data.append(row_data)
+        
+        matrix_df = pd.DataFrame(matrix_data)
+        
+        # 컬럼 설정 (각 날짜 컬럼을 SelectBox로)
+        col_config = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
+        for d in selected_dates:
+            col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+            col_config[col_label] = st.column_config.SelectboxColumn(
+                options=bar_options,
+                required=True,
+                width="small"
+            )
+        
+        edited_matrix = st.data_editor(
+            matrix_df,
+            column_config=col_config,
+            use_container_width=True,
+            hide_index=True,
+            key="apply_matrix_editor"
+        )
+        
+        # 권장 BAR 참고 표 (expander 안에)
+        with st.expander("🎯 권장 BAR 참고 (시스템 자동 계산)", expanded=False):
+            rec_matrix = []
+            for rid in DYNAMIC_ROOMS:
+                rec_row = {"객실": rid}
+                for d in selected_dates:
+                    date_str = d.strftime('%Y-%m-%d')
+                    col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                    rec_row[col_label] = rec_bar_map.get((rid, date_str), "-")
+                rec_matrix.append(rec_row)
+            st.dataframe(pd.DataFrame(rec_matrix), use_container_width=True, hide_index=True)
+        
+        # 편집된 매트릭스를 applied_input에 반영
+        for idx, row in edited_matrix.iterrows():
+            rid = row["객실"]
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                bar_val = str(row[col_label]).strip().upper() if row[col_label] else None
+                if bar_val and bar_val in bar_options:
+                    if d not in applied_input:
+                        applied_input[d] = {}
+                    applied_input[d][rid] = bar_val
+        
+        # 권장과 다른 값 카운트
+        diff_count = 0
         for d in selected_dates:
             date_str = d.strftime('%Y-%m-%d')
-            wd = WEEKDAYS_KR[d.weekday()]
-            
-            with st.expander(f"📅 {date_str} ({wd})", expanded=len(selected_dates) <= 3):
-                applied_input[d] = {}
-                cols = st.columns(5)
-                for idx, rid in enumerate(DYNAMIC_ROOMS):
-                    with cols[idx]:
-                        # 권장 BAR 계산
-                        curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
-                        rec_bar = "BAR5"
-                        if not curr_match.empty:
-                            _, rec_bar, _, _ = get_final_values(
-                                rid, d,
-                                curr_match.iloc[0]['Available'],
-                                curr_match.iloc[0]['Total']
-                            )
-                        
-                        # 기존 적용값
-                        existing = applied_rates.get(date_str, {}).get('rooms', {}).get(rid, rec_bar)
-                        default_idx = bar_options.index(existing) if existing in bar_options else bar_options.index(rec_bar)
-                        
-                        selected_bar = st.selectbox(
-                            f"**{rid}**",
-                            bar_options,
-                            index=default_idx,
-                            key=f"bar_{date_str}_{rid}",
-                            help=f"권장: {rec_bar}"
-                        )
-                        applied_input[d][rid] = selected_bar
-                        
-                        # 권장과 다르면 경고
-                        if selected_bar != rec_bar:
-                            st.caption(f"⚠️ 권장 {rec_bar}")
+            for rid in DYNAMIC_ROOMS:
+                applied_val = applied_input.get(d, {}).get(rid)
+                rec_val = rec_bar_map.get((rid, date_str))
+                if applied_val and rec_val and applied_val != rec_val:
+                    diff_count += 1
+        
+        if diff_count > 0:
+            st.warning(f"⚠️ 권장 BAR과 다른 값이 **{diff_count}개** 있습니다. 저장 전 확인하세요.")
+        else:
+            st.success("✅ 모든 값이 권장 BAR과 일치합니다.")
     
     st.divider()
     
