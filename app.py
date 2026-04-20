@@ -536,7 +536,7 @@ def render_apply_rate_ui(current_df, applied_rates):
         for d in selected_dates:
             applied_input[d] = {rid: unified_bar for rid in DYNAMIC_ROOMS}
     
-else:  # "✏️ 날짜별 개별 지정"
+    else:  # "✏️ 날짜별 개별 지정"
         st.info("💡 시장분석 표처럼 한눈에 보면서 편집할 수 있어요. 빨간색은 권장 BAR과 다른 값.")
         bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
         
