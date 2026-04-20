@@ -487,13 +487,63 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-# === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
-    with st.expander("🛠️ 듀얼트랙: 실제 온라인 셋팅 요금 확정 (Admin Only)", expanded=False):
-        st.write("※ 총지배인 지시 등으로 시스템 권장 요금과 다르게 '실제 세팅한 요금'을 입력하는 곳입니다. 입력 시 상/하단 표에 듀얼트랙으로 표기됩니다.")
-        dates_list = sorted(st.session_state.today_df['Date'].unique())
-        matrix_data = []
+# === [수정 사항] 수기 입력 최소화! 스마트 락 & 언락 시스템 ===
+    with st.expander("🛠️ 전략적 요금 컨트롤 타워 (수기입력 최소화)", expanded=False):
+        st.write("※ 엑셀 업로드 후, 아래 순서대로 클릭하면 수기 입력 없이 요금을 통제할 수 있습니다.")
         
-        # 표 모양으로 데이터 재조립 (가로: 날짜, 세로: 객실)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### 🔒 1단계: 기존 요금 방어")
+            st.caption("어제 팔던 요금 그대로 전체 락(Lock)을 겁니다. (재고가 줄어서 권장 요금이 올라도 안 따라감)")
+            if st.button("🛡️ 어제 실제 요금으로 전체 동결", use_container_width=True):
+                new_manual_bars = st.session_state.get('manual_bars', {}).copy()
+                if not st.session_state.prev_df.empty:
+                    for idx, row in st.session_state.today_df.iterrows():
+                        d = row['Date']
+                        rid = row['RoomID']
+                        o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                        
+                        # 어제 데이터에서 실제 팔던 요금(최종 BAR) 추적
+                        prev_m = st.session_state.prev_df[(st.session_state.prev_df['RoomID'] == rid) & (st.session_state.prev_df['Date'] == d)]
+                        if not prev_m.empty:
+                            p_avail = prev_m.iloc[0]['Available']
+                            p_total = prev_m.iloc[0]['Total']
+                            p_m_bar = st.session_state.get('manual_bars', {}).get(o_key)
+                            _, prev_actual_bar, _, _ = get_final_values(rid, d, p_avail, p_total, p_m_bar)
+                            
+                            # 어제 요금으로 수동 개입(manual_bars)을 덮어씌워버림 = 동결
+                            new_manual_bars[o_key] = prev_actual_bar
+                    st.session_state.manual_bars = new_manual_bars
+                    st.success("✅ 전체 날짜가 어제 요금으로 동결되었습니다!")
+                    st.rerun()
+                else:
+                    st.warning("과거 기록이 없어 동결할 수 없습니다. (신규 데이터)")
+
+        with col2:
+            st.markdown("#### ✨ 2단계: 특정일 인상/수정")
+            st.caption("총지배인님 지시 등으로 새 시스템 요금을 적용할 날짜만 고르세요.")
+            dates_list = sorted(st.session_state.today_df['Date'].unique())
+            selected_dates = st.multiselect("적용할 날짜 선택", options=dates_list, format_func=lambda x: x.strftime('%m-%d'), label_visibility="collapsed")
+            
+            if st.button("🚀 선택한 날짜만 새 요금으로 락 해제", use_container_width=True):
+                if selected_dates:
+                    current_manual_bars = st.session_state.manual_bars.copy()
+                    for d in selected_dates:
+                        for rid in ALL_ROOMS:
+                            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                            # 해당 날짜의 락을 지워버림 -> 오늘 계산된 권장 요금으로 자연스럽게 따라감
+                            current_manual_bars.pop(o_key, None)
+                    st.session_state.manual_bars = current_manual_bars
+                    st.success(f"✅ {len(selected_dates)}일치 요금이 새 권장 요금으로 업데이트 되었습니다!")
+                    st.rerun()
+                else:
+                    st.warning("날짜를 먼저 선택해주세요.")
+                    
+        st.divider()
+        st.write("📝 **3단계 (옵션): 개별 수기 직접 입력** (특정 객실을 완전히 다른 요금으로 뺄 때만 쓰세요)")
+        
+        matrix_data = []
         for rid in ALL_ROOMS:
             row_data = {"객실": rid}
             for d in dates_list:
@@ -502,22 +552,23 @@ if not st.session_state.today_df.empty:
             matrix_data.append(row_data)
             
         ed_df = pd.DataFrame(matrix_data)
-        
-        # 에디터 UI 적용 (객실명 수정 불가 처리)
         col_config = {"객실": st.column_config.TextColumn(disabled=True)}
         edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
         
-        if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
-            new_manual_bars = {}
+        if st.button("💾 표 수기입력 내용 저장", use_container_width=True):
+            new_manual_bars = st.session_state.manual_bars.copy()
             for idx, row in edited_matrix.iterrows():
                 rid = row["객실"]
                 for d in dates_list:
                     val = str(row[d.strftime('%m-%d')]).strip()
+                    o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
                     if val and val.upper() not in ["NONE", "NAN", ""]:
-                        key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                        new_manual_bars[key] = val.upper()
+                        new_manual_bars[o_key] = val.upper()
+                    else:
+                        # 사용자가 에디터에서 값을 지우면 락 해제
+                        new_manual_bars.pop(o_key, None)
             st.session_state.manual_bars = new_manual_bars
-            st.success("실제 세팅 요금이 적용되었습니다! (권장 요금과 다를 경우 노란색으로 강조됩니다)")
+            st.success("수기 입력 내역이 저장되었습니다.")
             st.rerun()
 
     st.divider()
