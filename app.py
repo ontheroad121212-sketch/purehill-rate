@@ -826,9 +826,6 @@ if not st.session_state.today_df.empty:
 
     # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
     with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
-
-    # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
-    with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
         st.write("※ 여기서 수정한 내용은 오직 하단의 '✅ 판매가 산출' 표와 엑셀 다운로드에만 반영되며, 상단의 시장 분석 데이터는 원본 시스템 계산값을 유지합니다.")
         dates_list = sorted(st.session_state.today_df['Date'].unique())
         matrix_data = []
