@@ -697,8 +697,8 @@ def render_apply_rate_ui(current_df, applied_rates):
                 st.rerun()
 
 # --- 4-D. 채널 판매가 (적용가 기준) ---
-def render_channel_sale_table(current_df, ch_name, applied_rates):
-    """채널별 판매가 - 시스템 권장가 베이스에 적용 BAR 덮어쓰기"""
+def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates):
+    """채널별 판매가 - 판도 변화 및 수동 오버라이드 시각적 분리 적용"""
     if current_df.empty:
         return ""
     
@@ -752,10 +752,17 @@ def render_channel_sale_table(current_df, ch_name, applied_rates):
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             
-            # 기본 시스템 권장가 확인
+            # 1. 기본 시스템 권장가
             _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
             
-            # 5번 섹션에서 수동 적용한 BAR 확인
+            # 2. 이전 데이터 (어제 기준) 가져오기
+            prev_bar = None
+            if prev_df is not None and not prev_df.empty:
+                prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
+                if not prev_m.empty:
+                    _, prev_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
+            
+            # 3. 5번 섹션 수동 적용 오버라이드 확인
             applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
             is_applied = applied_bar is not None
             
@@ -763,21 +770,43 @@ def render_channel_sale_table(current_df, ch_name, applied_rates):
             final_bar = applied_bar if is_applied else rec_bar
             base_price = get_bar_price(rid, final_bar)
             
-            # 판매가 계산
+            # 판도 변화 판단 (어제 요금과 오늘의 최종 요금이 다를 경우)
+            curr_b_str = str(final_bar).strip() if final_bar else ""
+            prev_b_str = str(prev_bar).strip() if prev_bar else ""
+            is_trend_changed = (prev_bar is not None and prev_b_str != curr_b_str)
+            
             try:
                 b_price = float(base_price) if base_price else 0
                 after_disc = b_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 
-                # 색상은 항상 시스템 권장가든 최종 확정가든 해당 BAR에 맞춰 출력
-                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
-                
-                if is_applied:
-                    style = f"border:2px dashed #2E7D32; padding:4px; text-align:center; background:{bg}; font-weight:bold;"
-                    content = f"⭐ {final_p:,}<br><span style='font-size:9px;'>{final_bar}</span>"
+                # --- 시각화 핵심 로직 ---
+                # A. 판도 변화 시 색상 적용
+                if is_trend_changed:
+                    bg = BAR_GRADIENT_COLORS.get(final_bar, "#7000FF")
+                    txt_color = "white"
+                    font_weight = "bold"
+                    trend_icon = "▲ "
                 else:
-                    style = f"border:1px solid #ddd; padding:4px; text-align:center; background:{bg};"
-                    content = f"{final_p:,}<br><span style='font-size:9px; color:#555;'>{final_bar}</span>"
+                    bg = "#FFFFFF" # 평소에는 흰색 바탕
+                    txt_color = "#000"
+                    font_weight = "normal"
+                    trend_icon = ""
+
+                # B. 전략적 오버라이드 시 테두리 및 아이콘 강조
+                if is_applied:
+                    border_style = "border: 2px dashed #D32F2F;" # 붉은 점선
+                    icon = "⭐"
+                    label_color = "#FFF" if is_trend_changed else "#D32F2F"
+                    bar_label = f"<span style='font-size:9px; color:{label_color}; font-weight:bold;'>수동:{final_bar}</span>"
+                else:
+                    border_style = "border: 1px solid #ddd;"
+                    icon = ""
+                    label_color = "#FFF" if is_trend_changed else "#999"
+                    bar_label = f"<span style='font-size:9px; color:{label_color};'>{final_bar}</span>"
+                
+                style = f"background-color: {bg}; color: {txt_color}; font-weight: {font_weight}; {border_style}; padding:4px; text-align:center;"
+                content = f"{icon}{trend_icon}{final_p:,}<br>{bar_label}"
                 
                 html += f"<td style='{style}'>{content}</td>"
             except:
@@ -1058,14 +1087,15 @@ if not st.session_state.today_df.empty:
     if st.session_state.channel_list:
         st.markdown("""
         <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
-            💡 <b>채널 판매가는 '적용가(⭐)' 기준으로 계산됩니다.</b> 
-            적용 기록이 없는 날짜는 기본 시스템 권장가로 자동 계산 및 색상 표시됩니다.
+            💡 <b>채널 판매가 표기 규칙</b><br>
+            - 배경색(그라데이션): 어제 대비 요금이 변동(판도 변화)되었을 때만 나타납니다.<br>
+            - 붉은 점선과 ⭐: 수동으로 전략적 오버라이드한 날짜에만 나타납니다.
         </div>
         """, unsafe_allow_html=True)
         
         for ch in st.session_state.channel_list:
             st.markdown(render_channel_sale_table(
-                curr_filtered, ch, applied_rates_data
+                curr_filtered, prev_filtered, ch, applied_rates_data
             ), unsafe_allow_html=True)
 
     st.divider()
