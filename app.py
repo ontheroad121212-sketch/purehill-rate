@@ -190,52 +190,32 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             
-            # [핵심] 권장 요금(시스템 계산) 먼저 산출
-            occ, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total, None)
-            
-            # [핵심] 실제 세팅 요금(수동 입력) 확인
+            # [핵심 로직] mode가 "판매가"일 때만 manual_bar를 가져오고, 나머지는 시스템 원본 사용
             override_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-            m_bar = st.session_state.get('manual_bars', {}).get(override_key)
-            
-            if m_bar:
-                _, final_bar, final_price, _ = get_final_values(rid, d, avail, total, m_bar)
-                is_manual = True
-            else:
-                final_bar = rec_bar
-                final_price = rec_price
-                is_manual = False
+            m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
+            occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, m_bar)
             
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
-                    p_m_bar = st.session_state.get('manual_bars', {}).get(override_key)
-                    # 이전 데이터도 동일하게 세팅 요금 반영 여부 확인
-                    if p_m_bar: _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], p_m_bar)
-                    else: _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], None)
+                    p_m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
+                    _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], p_m_bar)
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
             
             if mode == "기준":
-                if is_manual and final_bar != rec_bar:
-                    bg = "#FFF9C4" # 권장과 실제가 다름 (연노랑)
-                    style += f"background-color: {bg}; border: 2.5px solid #FF9800;"
-                    content = f"<span style='color:#E65100; font-size:10px; font-weight:bold;'>권장: {rec_bar}</span><br><b style='color:blue;'>실제: {final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
-                elif is_manual and final_bar == rec_bar:
-                    bg = "#E8F5E9" # 권장과 실제가 같고 확정됨 (연초록)
-                    style += f"background-color: {bg}; border: 2.5px solid #4CAF50;"
-                    content = f"<span style='color:#2E7D32; font-size:10px; font-weight:bold;'>✅ 확정</span><br><b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
-                else:
-                    bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
-                    style += f"background-color: {bg};"
-                    content = f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
+                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
+                style += f"background-color: {bg};"
+                # 기준 모드에서는 원본 데이터 표시만 수행 (is_manual 분기 제거)
+                content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
                 pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
-                bg = BAR_LIGHT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#FFFFFF"
+                bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#FFFFFF"
                 style += f"background-color: {bg};"
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
@@ -246,43 +226,40 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else: content = "-"
             
             elif mode == "판도변화":
-                curr_b_str = str(final_bar).strip() if final_bar else ""
+                curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 
                 if prev_bar is not None and prev_b_str != curr_b_str:
-                    bg = BAR_GRADIENT_COLORS.get(final_bar, "#7000FF")
+                    bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
-                    content = f"▲ {final_bar}"
+                    content = f"▲ {bar}"
                 else: 
-                    content = final_bar
+                    content = bar
                     
             elif mode == "판매가":
                 try:
-                    b_price = float(final_price) if final_price is not None else 0
+                    b_price = float(base_price) if base_price is not None else 0
                     d_rate = float(discount) if discount is not None else 0
                     a_price = float(add_price) if add_price is not None else 0
                     
                     after_disc = b_price * (1 - (d_rate / 100))
                     final_p = int((math.floor(after_disc / 1000) * 1000) + a_price)
-                    
-                    if is_manual and final_bar != rec_bar:
-                        style += "background-color: #FFF9C4; border: 2.5px dashed #FF9800;"
-                        content = f"<span style='color:#E65100; font-size:10px; font-weight:bold;'>권장: {rec_bar}</span><br><b>{final_p:,}</b>"
-                    elif is_manual and final_bar == rec_bar:
-                        style += "background-color: #E8F5E9; border: 2.5px solid #4CAF50;"
-                        content = f"<span style='color:#2E7D32; font-size:10px; font-weight:bold;'>✅ 확정</span><br><b>{final_p:,}</b>"
-                    else:
-                        content = f"<b>{final_p:,}</b>"
+                    content = f"<b>{final_p:,}</b>"
                     
                 except (ValueError, TypeError, ZeroDivisionError):
                     content = "<b>-</b>"
 
-                curr_b_str = str(final_bar).strip() if final_bar else ""
+                curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 
                 if prev_bar is not None and prev_b_str != curr_b_str:
-                    bg = BAR_GRADIENT_COLORS.get(final_bar, "#7000FF")
+                    bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
+                
+                # 판매가 산출 모드에서만 수동 조작 표기
+                if is_manual:
+                    style += "border: 2px dashed #FF0000;"
+                    content = f"⭐ {content}"
 
             html += f"<td style='{style}'>{content}</td>"
         html += "</tr>"
@@ -487,63 +464,13 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-# === [수정 사항] 수기 입력 최소화! 스마트 락 & 언락 시스템 ===
-    with st.expander("🛠️ 전략적 요금 컨트롤 타워 (수기입력 최소화)", expanded=False):
-        st.write("※ 엑셀 업로드 후, 아래 순서대로 클릭하면 수기 입력 없이 요금을 통제할 수 있습니다.")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### 🔒 1단계: 기존 요금 방어")
-            st.caption("어제 팔던 요금 그대로 전체 락(Lock)을 겁니다. (재고가 줄어서 권장 요금이 올라도 안 따라감)")
-            if st.button("🛡️ 어제 실제 요금으로 전체 동결", use_container_width=True):
-                new_manual_bars = st.session_state.get('manual_bars', {}).copy()
-                if not st.session_state.prev_df.empty:
-                    for idx, row in st.session_state.today_df.iterrows():
-                        d = row['Date']
-                        rid = row['RoomID']
-                        o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                        
-                        # 어제 데이터에서 실제 팔던 요금(최종 BAR) 추적
-                        prev_m = st.session_state.prev_df[(st.session_state.prev_df['RoomID'] == rid) & (st.session_state.prev_df['Date'] == d)]
-                        if not prev_m.empty:
-                            p_avail = prev_m.iloc[0]['Available']
-                            p_total = prev_m.iloc[0]['Total']
-                            p_m_bar = st.session_state.get('manual_bars', {}).get(o_key)
-                            _, prev_actual_bar, _, _ = get_final_values(rid, d, p_avail, p_total, p_m_bar)
-                            
-                            # 어제 요금으로 수동 개입(manual_bars)을 덮어씌워버림 = 동결
-                            new_manual_bars[o_key] = prev_actual_bar
-                    st.session_state.manual_bars = new_manual_bars
-                    st.success("✅ 전체 날짜가 어제 요금으로 동결되었습니다!")
-                    st.rerun()
-                else:
-                    st.warning("과거 기록이 없어 동결할 수 없습니다. (신규 데이터)")
-
-        with col2:
-            st.markdown("#### ✨ 2단계: 특정일 인상/수정")
-            st.caption("총지배인님 지시 등으로 새 시스템 요금을 적용할 날짜만 고르세요.")
-            dates_list = sorted(st.session_state.today_df['Date'].unique())
-            selected_dates = st.multiselect("적용할 날짜 선택", options=dates_list, format_func=lambda x: x.strftime('%m-%d'), label_visibility="collapsed")
-            
-            if st.button("🚀 선택한 날짜만 새 요금으로 락 해제", use_container_width=True):
-                if selected_dates:
-                    current_manual_bars = st.session_state.manual_bars.copy()
-                    for d in selected_dates:
-                        for rid in ALL_ROOMS:
-                            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                            # 해당 날짜의 락을 지워버림 -> 오늘 계산된 권장 요금으로 자연스럽게 따라감
-                            current_manual_bars.pop(o_key, None)
-                    st.session_state.manual_bars = current_manual_bars
-                    st.success(f"✅ {len(selected_dates)}일치 요금이 새 권장 요금으로 업데이트 되었습니다!")
-                    st.rerun()
-                else:
-                    st.warning("날짜를 먼저 선택해주세요.")
-                    
-        st.divider()
-        st.write("📝 **3단계 (옵션): 개별 수기 직접 입력** (특정 객실을 완전히 다른 요금으로 뺄 때만 쓰세요)")
-        
+    # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
+    with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
+        st.write("※ 여기서 수정한 내용은 오직 하단의 '✅ 판매가 산출' 표와 엑셀 다운로드에만 반영되며, 상단의 시장 분석 데이터는 원본 시스템 계산값을 유지합니다.")
+        dates_list = sorted(st.session_state.today_df['Date'].unique())
         matrix_data = []
+        
+        # 표 모양으로 데이터 재조립 (가로: 날짜, 세로: 객실)
         for rid in ALL_ROOMS:
             row_data = {"객실": rid}
             for d in dates_list:
@@ -552,23 +479,22 @@ if not st.session_state.today_df.empty:
             matrix_data.append(row_data)
             
         ed_df = pd.DataFrame(matrix_data)
+        
+        # 에디터 UI 적용 (객실명 수정 불가 처리)
         col_config = {"객실": st.column_config.TextColumn(disabled=True)}
         edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
         
-        if st.button("💾 표 수기입력 내용 저장", use_container_width=True):
-            new_manual_bars = st.session_state.manual_bars.copy()
+        if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
+            new_manual_bars = {}
             for idx, row in edited_matrix.iterrows():
                 rid = row["객실"]
                 for d in dates_list:
                     val = str(row[d.strftime('%m-%d')]).strip()
-                    o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
                     if val and val.upper() not in ["NONE", "NAN", ""]:
-                        new_manual_bars[o_key] = val.upper()
-                    else:
-                        # 사용자가 에디터에서 값을 지우면 락 해제
-                        new_manual_bars.pop(o_key, None)
+                        key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                        new_manual_bars[key] = val.upper()
             st.session_state.manual_bars = new_manual_bars
-            st.success("수기 입력 내역이 저장되었습니다.")
+            st.success("수동 오버라이드가 하단 판매가 리포트에 적용되었습니다.")
             st.rerun()
 
     st.divider()
