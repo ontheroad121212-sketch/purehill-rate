@@ -50,6 +50,9 @@ FIXED_PRICE_TABLE = {
 # FIXED 객실용 수동 BAR0 가격 테이블 추가
 FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, "PPV": 1704000}
 
+# --- 2-A. 오늘 날짜 기준 ---
+TODAY = date.today()
+
 # --- 3. 로직 함수 ---
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
@@ -129,6 +132,31 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
         bar = type_code
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
     return occ, bar, price, False # is_manual = False
+
+def date_filter_toggle(key_prefix, total_dates, default_show_past=False):
+    """과거 날짜 표시 토글. True면 전체, False면 오늘 이후만"""
+    past_count = sum(1 for d in total_dates if d < TODAY)
+    future_count = len(total_dates) - past_count
+    
+    if past_count == 0:
+        return total_dates  # 과거 없으면 그대로
+    
+    show_past = st.checkbox(
+        f"📜 과거 {past_count}일 포함 (현재 미래 {future_count}일만 표시)",
+        value=default_show_past,
+        key=f"show_past_{key_prefix}"
+    )
+    
+    if show_past:
+        return total_dates
+    else:
+        return [d for d in total_dates if d >= TODAY]
+
+def filter_df_by_dates(df, visible_dates):
+    """DataFrame을 보이는 날짜만 필터링"""
+    if df.empty:
+        return df
+    return df[df['Date'].isin(visible_dates)].copy()
 
 # --- 4. 렌더러 ---
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
@@ -445,15 +473,31 @@ def render_apply_rate_ui(current_df, applied_rates):
     
     st.caption("🔧 시장분석처럼 격자 형태로 편집 → 수정 후 저장하면 CMS 적용 기록으로 저장됩니다.")
     
-    dates = sorted(current_df['Date'].unique())
+    all_dates_full = sorted(current_df['Date'].unique())
     today = date.today()
+    
+    # 적용 UI는 기본적으로 '오늘 이후'만 대상
+    include_past = st.checkbox(
+        "📜 과거 날짜도 선택 가능하게 (기본: 오늘 이후만)",
+        value=False,
+        key="apply_include_past"
+    )
+    
+    if include_past:
+        dates = all_dates_full
+    else:
+        dates = [d for d in all_dates_full if d >= today]
+    
+    if not dates:
+        st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
+        return
     
     # 빠른 날짜 선택
     col_a, col_b = st.columns([2, 1])
     with col_a:
         quick_select = st.selectbox(
             "📅 빠른 날짜 선택",
-            ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 날짜", "직접 선택"],
+            ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 (필터된)", "직접 선택"],
             key="apply_quick_select"
         )
     
@@ -468,7 +512,7 @@ def render_apply_rate_ui(current_df, applied_rates):
         preset_dates = [d for d in dates if monday <= d <= sunday]
     elif quick_select == "이번 달 남은 날":
         preset_dates = [d for d in dates if d >= today and d.month == today.month]
-    elif quick_select == "전체 날짜":
+    elif quick_select == "전체 (필터된)":
         preset_dates = list(dates)
     
     selected_dates = st.multiselect(
@@ -672,6 +716,94 @@ def render_apply_rate_ui(current_df, applied_rates):
                     del st.session_state[matrix_key]
                 st.rerun()
 
+# --- 4-D. 채널 판매가 (적용가 기준) ---
+def render_channel_sale_table(current_df, ch_name, applied_rates):
+    """채널별 판매가 - 적용 BAR 기준"""
+    if current_df.empty:
+        return ""
+    
+    items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
+    if not items_to_show:
+        return f"<div style='padding:10px; color:gray;'>👉 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
+    
+    dates = sorted(current_df['Date'].unique())
+    
+    html = f"""
+    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
+                padding:10px; background:#E8F5E9; border-left:10px solid #2E7D32;'>
+        ✅ {ch_name} 판매가 산출 (적용가 기준)
+    </div>
+    """
+    html += "<div style='overflow-x:auto; white-space:nowrap; border:1px solid #ddd;'>"
+    html += "<table style='width:100%; border-collapse:collapse; font-size:11px; min-width:1000px;'>"
+    html += "<thead><tr style='background:#f9f9f9;'>"
+    html += "<th rowspan='2' style='border:1px solid #ddd; width:200px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:5px;'>객실/프로모션</th>"
+    for d in dates:
+        html += f"<th style='border:1px solid #ddd; padding:3px; min-width:70px;'>{d.strftime('%m-%d')}</th>"
+    html += "</tr><tr style='background:#f9f9f9;'>"
+    for d in dates:
+        wd = WEEKDAYS_KR[d.weekday()]
+        color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
+        html += f"<th style='border:1px solid #ddd; padding:3px; color:{color};'>{wd}</th>"
+    html += "</tr></thead><tbody>"
+    
+    for item in items_to_show:
+        rid = item.get('객실타입', 'Unknown')
+        label_text = item.get('상품명', 'No Name')
+        label = f"<b>{rid}</b> <span style='color:blue; font-size:10px;'>: {label_text}</span>"
+        
+        try: discount = float(item.get('할인(%)') or 0)
+        except: discount = 0.0
+        try: add_price = int(item.get('추가금') or 0)
+        except: add_price = 0
+        
+        border_thick = "border-bottom:3px solid #000;" if rid in ["HDF", "PPV"] else ""
+        html += f"<tr style='{border_thick}'>"
+        html += f"<td style='border:1px solid #ddd; padding:4px; background:#fff; border-right:3px solid #000; position:sticky; left:0; z-index:1; font-size:11px;'>{label}</td>"
+        
+        for d in dates:
+            date_str = d.strftime('%Y-%m-%d')
+            curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            
+            if curr_match.empty:
+                html += "<td style='border:1px solid #ddd; padding:4px; text-align:center;'>-</td>"
+                continue
+            
+            avail = curr_match.iloc[0]['Available']
+            total = curr_match.iloc[0]['Total']
+            
+            # 적용 BAR 우선, 없으면 권장 BAR
+            applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+            is_applied = applied_bar is not None
+            
+            if is_applied:
+                base_price = get_bar_price(rid, applied_bar)
+                bar_used = applied_bar
+            else:
+                _, bar_used, base_price, _ = get_final_values(rid, d, avail, total)
+            
+            # 판매가 계산
+            try:
+                b_price = float(base_price) if base_price else 0
+                after_disc = b_price * (1 - (discount / 100))
+                final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
+                
+                if is_applied:
+                    style = "border:1px solid #ddd; padding:4px; text-align:center; background:#E8F5E9; color:#2E7D32; font-weight:bold;"
+                    content = f"⭐ {final_p:,}<br><span style='font-size:9px; color:#777;'>{bar_used}</span>"
+                else:
+                    style = "border:1px solid #ddd; padding:4px; text-align:center; background:#F5F5F5; color:#666;"
+                    content = f"{final_p:,}<br><span style='font-size:9px; color:#999;'>{bar_used} 권장</span>"
+                
+                html += f"<td style='{style}'>{content}</td>"
+            except:
+                html += "<td style='border:1px solid #ddd; padding:4px; text-align:center;'>-</td>"
+        
+        html += "</tr>"
+    
+    html += "</tbody></table></div>"
+    return html
+
 # --- 5. 파서 및 DB 로직 ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
@@ -865,17 +997,37 @@ if not st.session_state.today_df.empty:
     
     if st.session_state.compare_label:
         st.info(f"ℹ️ {st.session_state.compare_label}")
-        
-    st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
-    st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
+    
+    # 🕐 전역 날짜 필터 (최상단)
+    all_dates = sorted(curr['Date'].unique())
+    st.markdown(f"""
+    <div style='background:#E3F2FD; padding:10px 15px; border-radius:8px; margin:15px 0; 
+                border-left:5px solid #1976D2;'>
+        📅 <b>오늘 기준:</b> {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[TODAY.weekday()]}) · 
+        기본적으로 <b>오늘 이후</b>만 표시됩니다. 과거 보려면 아래 체크박스 활성화하세요.
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 🎛️ 토글로 필터링된 날짜
+    visible_dates = date_filter_toggle("main", all_dates, default_show_past=False)
+    
+    # 필터링된 DF
+    curr_filtered = filter_df_by_dates(curr, visible_dates)
+    prev_filtered = filter_df_by_dates(prev, visible_dates) if not prev.empty else prev
+    
+    if curr_filtered.empty:
+        st.warning("⚠️ 표시할 날짜가 없습니다. 위 체크박스를 활성화하거나 파일을 업로드하세요.")
+    else:
+        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
+        st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-    # --- 4번 표: 권장 vs 적용 비교 ---
-    applied_rates_data = load_applied_rates()
-    st.markdown(render_applied_vs_recommend_table(curr, applied_rates_data), unsafe_allow_html=True)
+        # --- 4번 표: 권장 vs 적용 비교 ---
+        applied_rates_data = load_applied_rates()
+        st.markdown(render_applied_vs_recommend_table(curr_filtered, applied_rates_data), unsafe_allow_html=True)
 
-    # --- 5번: 요금 적용 UI ---
-    render_apply_rate_ui(curr, applied_rates_data)
+        # --- 5번: 요금 적용 UI (항상 전체 날짜 대상, 자체 필터링) ---
+        render_apply_rate_ui(curr, applied_rates_data)
 
     # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
     with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
@@ -912,8 +1064,19 @@ if not st.session_state.today_df.empty:
 
     st.divider()
 
-    for ch in st.session_state.channel_list:
-        st.markdown(render_master_table(curr, prev, ch_name=ch, title=f"✅ {ch} 판매가 산출", mode="판매가"), unsafe_allow_html=True)
+    # 채널 판매가도 필터 적용 + 적용가 기준 계산
+    if st.session_state.channel_list:
+        st.markdown("""
+        <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
+            💡 <b>채널 판매가는 '적용가(⭐)' 기준으로 계산됩니다.</b> 
+            적용 기록이 없는 날짜는 권장가로 계산됩니다.
+        </div>
+        """, unsafe_allow_html=True)
+        
+        for ch in st.session_state.channel_list:
+            st.markdown(render_channel_sale_table(
+                curr_filtered, ch, applied_rates_data
+            ), unsafe_allow_html=True)
 
     st.divider()
     
@@ -924,26 +1087,52 @@ if not st.session_state.today_df.empty:
     def generate_excel():
         output = io.BytesIO()
         export_data = []
+        applied_rates_export = load_applied_rates()
+        
         for idx, row in st.session_state.today_df.iterrows():
             d = row['Date']
             rid = row['RoomID']
-            o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-            # 엑셀 다운로드에는 관리자가 수동으로 개입한 최종 전략 값이 반영되도록 설정
-            m_bar = st.session_state.get('manual_bars', {}).get(o_key)
-            occ, bar, b_price, is_man = get_final_values(rid, d, row['Available'], row['Total'], m_bar)
+            date_str = d.strftime('%Y-%m-%d')
+            
+            # 권장 BAR (시스템 계산)
+            occ, rec_bar, rec_price, _ = get_final_values(rid, d, row['Available'], row['Total'])
+            
+            # 적용 BAR (있으면)
+            applied_bar = applied_rates_export.get(date_str, {}).get('rooms', {}).get(rid)
+            applied_memo = applied_rates_export.get(date_str, {}).get('memo', '')
+            applied_at = applied_rates_export.get(date_str, {}).get('applied_at_display', '')
+            
+            if applied_bar:
+                applied_price = get_bar_price(rid, applied_bar)
+                status = "✅ 적용됨"
+                is_diff = "⚠️ 다름" if applied_bar != rec_bar else "일치"
+            else:
+                applied_price = None
+                status = "⚪ 대기중"
+                is_diff = "-"
+            
+            is_past = "📜 과거" if d < TODAY else "🔮 미래"
+            
             export_data.append({
-                "날짜": d.strftime('%Y-%m-%d'),
+                "날짜": date_str,
+                "요일": WEEKDAYS_KR[d.weekday()],
+                "과거/미래": is_past,
                 "객실타입": rid,
                 "잔여객실": row['Available'],
                 "전체객실": row['Total'],
                 "점유율(%)": round(occ, 1),
-                "적용BAR": bar,
-                "판매가": b_price,
-                "수동개입": "O" if is_man else ""
+                "🎯권장BAR": rec_bar,
+                "🎯권장가": rec_price,
+                "⭐적용BAR": applied_bar if applied_bar else "-",
+                "⭐적용가": applied_price if applied_price else "-",
+                "상태": status,
+                "권장vs적용": is_diff,
+                "메모": applied_memo,
+                "반영일시": applied_at
             })
         df_export = pd.DataFrame(export_data)
         with pd.ExcelWriter(output) as writer:
-            df_export.to_excel(writer, index=False, sheet_name='시장분석데이터')
+            df_export.to_excel(writer, index=False, sheet_name='권장vs적용')
         return output.getvalue()
 
     st.download_button(
