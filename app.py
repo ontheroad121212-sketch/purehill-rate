@@ -354,9 +354,9 @@ def get_bar_price(room_id, bar):
     else:
         return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
 
-# --- 4-B. 종합 대시보드 (판도 변화 + 오버라이드) ---
-def render_applied_vs_recommend_table(current_df, prev_df, applied_rates):
-    """판도 변화 + 오버라이드 종합 표"""
+# --- 4-B. 권장 vs 적용 비교 표 ---
+def render_applied_vs_recommend_table(current_df, applied_rates):
+    """날짜별 × 객실별 권장 vs 적용 비교"""
     if current_df.empty:
         return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
 
@@ -365,12 +365,10 @@ def render_applied_vs_recommend_table(current_df, prev_df, applied_rates):
     html = """
     <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
                 padding:10px; background:#f0f2f6; border-left:10px solid #1976D2;'>
-        🎯 4. CMS 적용 현황 종합 (판도 변화 + 오버라이드)
+        🎯 4. 권장 vs 적용 비교 (CMS 관리용)
     </div>
     <div style='padding:10px; background:#E3F2FD; border-radius:6px; margin-bottom:15px; font-size:12px;'>
-        🟢 <b>권장 그대로 적용</b> (조용히 반영)  |  
-        🟡 <b>판도 변화 ▲</b> (권장 BAR이 바뀜, CMS 작업 필요)  |  
-        🔴 <b>오버라이드 ⭐</b> (권장과 다르게 강제 유지)
+        🔴 권장 ≠ 적용 (놓친 날)  |  🟢 권장 = 적용 (잘 반영됨)  |  ⚪ 적용 대기중
     </div>
     """
     
@@ -379,24 +377,25 @@ def render_applied_vs_recommend_table(current_df, prev_df, applied_rates):
     html += "<thead><tr style='background:#1a1a2e; color:white;'>"
     html += "<th style='border:1px solid #444; padding:8px; width:90px; position:sticky; left:0; background:#1a1a2e; z-index:2;'>날짜</th>"
     html += "<th style='border:1px solid #444; padding:8px; width:60px;'>객실</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:150px;'>🎯 권장 (이전→현재)</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:200px;'>⭐ 최종 적용 (CMS)</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:80px;'>상태</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:130px;'>🎯 권장</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:180px;'>⭐ 적용 (실제 CMS)</th>"
     html += "<th style='border:1px solid #444; padding:8px;'>📝 메모</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:100px;'>⏰ 반영일</th>"
     html += "</tr></thead><tbody>"
 
+    # Dynamic 객실만 비교 대상 (Fixed는 고정가라 제외)
     for d in dates:
         date_str = d.strftime('%Y-%m-%d')
         applied_info = applied_rates.get(date_str, {})
         applied_rooms = applied_info.get('rooms', {})
         memo = applied_info.get('memo', '')
+        applied_at = applied_info.get('applied_at_display', '')
         
         wd = WEEKDAYS_KR[d.weekday()]
         wd_color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
         
-        displayed_rows = []
-        
-        for rid in DYNAMIC_ROOMS:
+        # Dynamic 객실별로 한 줄씩
+        for idx, rid in enumerate(DYNAMIC_ROOMS):
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
                 continue
@@ -405,148 +404,81 @@ def render_applied_vs_recommend_table(current_df, prev_df, applied_rates):
             total = curr_match.iloc[0]['Total']
             _, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
             
-            # 이전 권장 BAR (판도 변화 판단)
-            prev_rec_bar = None
-            if not prev_df.empty:
-                prev_match = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
-                if not prev_match.empty:
-                    _, prev_rec_bar, _, _ = get_final_values(
-                        rid, d, prev_match.iloc[0]['Available'], prev_match.iloc[0]['Total']
-                    )
+            applied_bar = applied_rooms.get(rid)
             
-            # 오버라이드 있으면 그 값, 없으면 권장값 = 최종 적용
-            override_bar = applied_rooms.get(rid)
-            is_override = override_bar is not None and override_bar != rec_bar
-            
-            if is_override:
-                final_bar = override_bar
-                final_price = get_bar_price(rid, override_bar)
+            # 상태 판단
+            if applied_bar is None:
+                status_color = "#F5F5F5"
+                applied_display = "<span style='color:#999;'>⚪ 대기중</span>"
+                applied_price_display = "<span style='color:#aaa; font-size:11px;'>미적용</span>"
+                row_bg = "#FAFAFA"
+            elif applied_bar == rec_bar:
+                status_color = "#E8F5E9"
+                applied_price = get_bar_price(rid, applied_bar)
+                applied_display = f"<b style='color:#2E7D32; font-size:18px;'>⭐ {applied_bar}</b>"
+                applied_price_display = f"<span style='color:#2E7D32; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
+                row_bg = "#F1F8E9"
             else:
-                final_bar = rec_bar
-                final_price = rec_price
+                status_color = "#FFEBEE"
+                applied_price = get_bar_price(rid, applied_bar)
+                applied_display = f"<b style='color:#C62828; font-size:18px;'>⭐ {applied_bar}</b>"
+                applied_price_display = f"<span style='color:#C62828; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
+                row_bg = "#FFF3F3"
             
-            # 판도 변화 여부 (이전 권장과 현재 권장이 다름)
-            is_panda_change = prev_rec_bar is not None and prev_rec_bar != rec_bar
-            
-            displayed_rows.append({
-                'rid': rid,
-                'rec_bar': rec_bar,
-                'rec_price': rec_price,
-                'prev_rec_bar': prev_rec_bar,
-                'final_bar': final_bar,
-                'final_price': final_price,
-                'is_override': is_override,
-                'is_panda_change': is_panda_change,
-            })
-        
-        if not displayed_rows:
-            continue
-        
-        # 각 객실별 렌더링
-        for idx, row_info in enumerate(displayed_rows):
-            rid = row_info['rid']
-            rec_bar = row_info['rec_bar']
-            rec_price = row_info['rec_price']
-            prev_rec_bar = row_info['prev_rec_bar']
-            final_bar = row_info['final_bar']
-            final_price = row_info['final_price']
-            is_override = row_info['is_override']
-            is_panda = row_info['is_panda_change']
-            
-            # 행 배경 색상
-            if is_override:
-                row_bg = "#FFEBEE"  # 빨강 (오버라이드)
-                status_icon = "🔴 오버라이드"
-                status_color = "#C62828"
-            elif is_panda:
-                row_bg = "#FFF8E1"  # 노랑 (판도 변화)
-                status_icon = "🟡 판도변화"
-                status_color = "#F57C00"
-            else:
-                row_bg = "#F1F8E9"  # 초록 (정상)
-                status_icon = "🟢 권장적용"
-                status_color = "#2E7D32"
-            
-            # 권장 셀 (이전→현재)
-            if is_panda and prev_rec_bar:
-                rec_cell = f"""
-                <div style='font-size:11px; color:#999; text-decoration:line-through;'>{prev_rec_bar}</div>
-                <div style='font-size:14px; font-weight:bold; color:#F57C00;'>▲ {rec_bar}</div>
-                <div style='font-size:11px; color:#777;'>{rec_price:,}원</div>
-                """
-            else:
-                rec_cell = f"""
-                <div style='font-size:13px; color:#555;'>{rec_bar}</div>
-                <div style='font-size:11px; color:#777;'>{rec_price:,}원</div>
-                """
-            
-            # 최종 적용 셀
-            if is_override:
-                final_cell = f"""
-                <div style='font-size:20px; font-weight:bold; color:#C62828;'>⭐ {final_bar}</div>
-                <div style='font-size:15px; font-weight:bold; color:#C62828;'>{final_price:,}원</div>
-                <div style='font-size:10px; color:#999;'>(권장 {rec_bar} 무시)</div>
-                """
-            else:
-                final_cell = f"""
-                <div style='font-size:18px; font-weight:bold; color:#2E7D32;'>{final_bar}</div>
-                <div style='font-size:14px; color:#2E7D32;'>{final_price:,}원</div>
-                """
-            
-            # 날짜 셀 (첫 줄에만)
+            # 첫 번째 객실 줄에만 날짜 표시
             if idx == 0:
-                date_cell = f"""<td rowspan='{len(displayed_rows)}' 
-                    style='border:1px solid #ddd; padding:8px; background:#fff; 
+                date_cell = f"""<td rowspan='{len(DYNAMIC_ROOMS)}' 
+                    style='border:1px solid #ddd; padding:8px; background:{status_color}; 
                     position:sticky; left:0; text-align:center; vertical-align:top; font-weight:bold;'>
                     <div style='font-size:14px;'>{d.strftime('%m-%d')}</div>
                     <div style='color:{wd_color}; font-size:13px;'>({wd})</div>
                 </td>"""
-                memo_cell = f"""<td rowspan='{len(displayed_rows)}' 
-                    style='border:1px solid #ddd; padding:8px; vertical-align:middle; font-size:11px;'>
-                    {memo if memo else '-'}
-                </td>"""
             else:
                 date_cell = ""
-                memo_cell = ""
+            
+            memo_display = memo if memo else "-"
+            applied_at_display_txt = applied_at[:10] if applied_at else "-"
             
             html += f"<tr style='background:{row_bg};'>"
             html += date_cell
             html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; font-weight:bold;'>{rid}</td>"
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center;'>{rec_cell}</td>"
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center;'>{final_cell}</td>"
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; color:{status_color}; font-size:11px; font-weight:bold;'>{status_icon}</td>"
-            html += memo_cell
+            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center;'>"
+            html += f"<div style='color:#555;'>{rec_bar}</div>"
+            html += f"<div style='color:#777; font-size:11px;'>{rec_price:,}원</div>"
+            html += f"</td>"
+            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; background:{status_color};'>"
+            html += f"{applied_display}<br>{applied_price_display}"
+            html += f"</td>"
+            # 메모/반영일은 날짜 기준이므로 첫 줄에만
+            if idx == 0:
+                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; font-size:11px;'>{memo_display}</td>"
+                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; text-align:center; font-size:11px;'>{applied_at_display_txt}</td>"
             html += "</tr>"
 
     html += "</tbody></table></div>"
     return html
 
-# --- 4-C. 오버라이드 전용 UI ---
+# --- 4-C. 요금 적용 UI (시장분석 형태) ---
 def render_apply_rate_ui(current_df, applied_rates):
-    """권장과 다르게 수동 조정할 날짜만 관리하는 오버라이드 UI"""
+    """날짜 찍어서 요금 적용하는 에디터 - 시장분석 스타일"""
     if current_df.empty:
         return
     
     st.markdown("""
     <div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; 
                 padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>
-        ⏰ 5. 오버라이드 (권장과 다르게 유지할 날짜만)
+        ⏰ 5. 요금 적용 (CMS 반영 기록)
     </div>
     """, unsafe_allow_html=True)
     
-    st.info("""
-    💡 **기본 원칙**: 모든 날짜는 **권장 BAR 그대로 CMS에 반영**됩니다. 
-    이 섹션에서는 **권장과 다르게 유지해야 할 날짜만** 지정하세요. (예: 총지배인 지시로 유지)
-    
-    ⚠️ 새 파일 업로드 시 **오버라이드는 모두 초기화**됩니다.
-    """)
+    st.caption("🔧 시장분석처럼 격자 형태로 편집 → 수정 후 저장하면 CMS 적용 기록으로 저장됩니다.")
     
     all_dates_full = sorted(current_df['Date'].unique())
     today = date.today()
     
-    # 기본: 오늘 이후만
+    # 적용 UI는 기본적으로 '오늘 이후'만 대상
     include_past = st.checkbox(
-        "📜 과거 날짜도 편집 가능하게 (기본: 오늘 이후만)",
+        "📜 과거 날짜도 선택 가능하게 (기본: 오늘 이후만)",
         value=False,
         key="apply_include_past"
     )
@@ -557,15 +489,56 @@ def render_apply_rate_ui(current_df, applied_rates):
         dates = [d for d in all_dates_full if d >= today]
     
     if not dates:
-        st.warning("⚠️ 편집 가능한 날짜가 없습니다.")
+        st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
         return
     
-    bar_options = ["권장"] + ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
+    # 빠른 날짜 선택
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        quick_select = st.selectbox(
+            "📅 빠른 날짜 선택",
+            ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 (필터된)", "직접 선택"],
+            key="apply_quick_select"
+        )
     
-    # 권장 BAR 맵
+    preset_dates = []
+    if quick_select == "이번 주 (월~일)":
+        monday = today - timedelta(days=today.weekday())
+        sunday = monday + timedelta(days=6)
+        preset_dates = [d for d in dates if monday <= d <= sunday]
+    elif quick_select == "다음 주":
+        monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
+        sunday = monday + timedelta(days=6)
+        preset_dates = [d for d in dates if monday <= d <= sunday]
+    elif quick_select == "이번 달 남은 날":
+        preset_dates = [d for d in dates if d >= today and d.month == today.month]
+    elif quick_select == "전체 (필터된)":
+        preset_dates = list(dates)
+    
+    selected_dates = st.multiselect(
+        "✅ 적용할 날짜 (여러 개 가능)",
+        options=dates,
+        default=preset_dates,
+        format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})",
+        key="apply_date_select"
+    )
+    
+    if not selected_dates:
+        st.info("👆 위에서 날짜를 먼저 선택하세요.")
+        return
+    
+    st.markdown(f"**선택됨: {len(selected_dates)}일**")
+    
+    # === 격자 에디터 ===
+    bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
+    
+    # 세션에 편집 중인 매트릭스 저장 (리셋 버튼용)
+    matrix_key = f"apply_matrix_data_{len(selected_dates)}"
+    
+    # 권장 BAR 맵 (비교용)
     rec_bar_map = {}
     for rid in DYNAMIC_ROOMS:
-        for d in dates:
+        for d in selected_dates:
             date_str = d.strftime('%Y-%m-%d')
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             rec_bar = "BAR5"
@@ -577,59 +550,86 @@ def render_apply_rate_ui(current_df, applied_rates):
                 )
             rec_bar_map[(rid, date_str)] = rec_bar
     
-    # 초기값: 적용 기록 있으면 그 BAR, 없으면 "권장"
+    # 초기값: 기존 applied_rates > 권장 BAR
     def build_initial_matrix():
         data = []
         for rid in DYNAMIC_ROOMS:
             row_data = {"객실": rid}
-            for d in dates:
+            for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
                 col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                # 기존 적용값 > 권장값
                 existing = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-                rec = rec_bar_map.get((rid, date_str), "BAR5")
-                # 기존 적용값이 권장과 같으면 "권장", 다르면 그 값
-                if existing and existing != rec:
+                if existing:
                     row_data[col_label] = existing
                 else:
-                    row_data[col_label] = "권장"
+                    row_data[col_label] = rec_bar_map.get((rid, date_str), "BAR5")
             data.append(row_data)
         return data
     
-    matrix_key = f"override_matrix_{len(dates)}"
+    # 빠른 채우기 버튼
+    st.markdown("**🔧 빠른 채우기**")
+    btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
     
-    # 리셋 버튼
-    col_r1, col_r2 = st.columns([4, 1])
-    with col_r2:
-        if st.button("🔄 전체 초기화", use_container_width=True, key="override_reset_all"):
+    with btn_col1:
+        if st.button("🎯 권장 BAR 전체 채우기", use_container_width=True, key="fill_recommended"):
+            data = []
+            for rid in DYNAMIC_ROOMS:
+                row_data = {"객실": rid}
+                for d in selected_dates:
+                    date_str = d.strftime('%Y-%m-%d')
+                    col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                    row_data[col_label] = rec_bar_map.get((rid, date_str), "BAR5")
+                data.append(row_data)
+            st.session_state[matrix_key] = data
+            st.rerun()
+    
+    with btn_col2:
+        bulk_bar = st.selectbox("일괄 BAR", bar_options, index=4, key="bulk_bar_select", label_visibility="collapsed")
+    
+    with btn_col3:
+        if st.button(f"⚡ 전체 {bulk_bar}로", use_container_width=True, key="fill_bulk"):
+            data = []
+            for rid in DYNAMIC_ROOMS:
+                row_data = {"객실": rid}
+                for d in selected_dates:
+                    col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                    row_data[col_label] = bulk_bar
+                data.append(row_data)
+            st.session_state[matrix_key] = data
+            st.rerun()
+    
+    with btn_col4:
+        if st.button("🔄 저장된 값으로 리셋", use_container_width=True, key="reset_matrix"):
             if matrix_key in st.session_state:
                 del st.session_state[matrix_key]
             st.rerun()
     
+    # 현재 매트릭스 (세션에 있으면 사용, 없으면 초기값)
     if matrix_key not in st.session_state:
         st.session_state[matrix_key] = build_initial_matrix()
     
     matrix_df = pd.DataFrame(st.session_state[matrix_key])
     
-    # 컬럼 설정
+    # 컬럼 설정 (셀을 드롭다운으로)
     col_config = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
-    for d in dates:
+    for d in selected_dates:
         col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
         col_config[col_label] = st.column_config.SelectboxColumn(
             options=bar_options,
             required=True,
-            width="small",
-            help=f"권장: 각 객실 권장값 사용"
+            width="small"
         )
     
-    st.markdown("### 📋 오버라이드 편집기")
-    st.caption("'권장' = 시스템 권장값 그대로 사용 | 'BARx' = 권장과 다르게 강제 지정")
+    st.markdown("### 📋 시장분석 형태 편집기")
+    st.caption("셀을 클릭해서 BAR 변경하세요. (가로: 날짜 / 세로: 객실)")
     
     edited_matrix = st.data_editor(
         matrix_df,
         column_config=col_config,
         use_container_width=True,
         hide_index=True,
-        key="override_matrix_editor"
+        key="apply_matrix_editor_v2"
     )
     
     # 권장 BAR 참고 표
@@ -637,66 +637,84 @@ def render_apply_rate_ui(current_df, applied_rates):
         rec_matrix = []
         for rid in DYNAMIC_ROOMS:
             rec_row = {"객실": rid}
-            for d in dates:
+            for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
                 col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
                 rec_row[col_label] = rec_bar_map.get((rid, date_str), "-")
             rec_matrix.append(rec_row)
         st.dataframe(pd.DataFrame(rec_matrix), use_container_width=True, hide_index=True)
     
-    # 오버라이드 카운트
-    override_count = 0
-    override_input = {}  # {date: {room_id: bar}}
+    # applied_input에 반영
+    applied_input = {}
+    diff_count = 0
     for idx, row in edited_matrix.iterrows():
         rid = row["객실"]
-        for d in dates:
+        for d in selected_dates:
             date_str = d.strftime('%Y-%m-%d')
             col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-            val = str(row[col_label]).strip() if row[col_label] else "권장"
-            if val != "권장" and val.upper() in bar_options:
-                if d not in override_input:
-                    override_input[d] = {}
-                override_input[d][rid] = val.upper()
-                override_count += 1
+            bar_val = str(row[col_label]).strip().upper() if row[col_label] else None
+            if bar_val and bar_val in bar_options:
+                if d not in applied_input:
+                    applied_input[d] = {}
+                applied_input[d][rid] = bar_val
+                # 권장과 차이 카운트
+                rec_val = rec_bar_map.get((rid, date_str))
+                if rec_val and bar_val != rec_val:
+                    diff_count += 1
     
-    if override_count > 0:
-        st.warning(f"⚠️ **{override_count}개 셀이 오버라이드됨** (권장과 다르게 지정). 저장 필요!")
+    # 상태 표시
+    if diff_count > 0:
+        st.warning(f"⚠️ 권장 BAR과 다른 값 **{diff_count}개** 있습니다. 저장 전 확인하세요.")
     else:
-        st.success("✅ 모든 날짜가 권장값 그대로 적용됩니다.")
+        st.success("✅ 모든 값이 권장 BAR과 일치합니다.")
     
     st.divider()
     
     # 메모
     memo = st.text_area(
-        "📝 메모 (오버라이드 이유)",
+        "📝 메모 (모든 선택된 날짜에 동일 적용)",
         placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함",
-        key="override_memo",
+        key="apply_memo",
         height=70
     )
     
-    # 저장 버튼
-    if st.button("💾 오버라이드 저장", type="primary", use_container_width=True, key="override_save_btn"):
-        # 기존 오버라이드 모두 삭제 후 새로 저장 (덮어쓰기)
-        existing = load_applied_rates()
-        for date_str in list(existing.keys()):
-            delete_applied_rate(date_str)
-        
-        # 새 오버라이드 저장
-        success_count = 0
-        for d, rooms_data in override_input.items():
-            date_str = d.strftime('%Y-%m-%d')
-            if save_applied_rate(date_str, rooms_data, memo):
-                success_count += 1
-        
-        if success_count > 0:
-            st.success(f"✅ {success_count}일 오버라이드 저장 완료!")
-            st.balloons()
-        else:
-            st.info("✅ 오버라이드 전체 초기화됨 (모두 권장값 적용)")
-        
-        if matrix_key in st.session_state:
-            del st.session_state[matrix_key]
-        st.rerun()
+    # 저장/삭제 버튼
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("💾 선택한 날짜 모두 적용 저장", type="primary", use_container_width=True, key="apply_save_btn"):
+            success_count = 0
+            fail_count = 0
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                rooms_data = applied_input.get(d, {})
+                if rooms_data:
+                    if save_applied_rate(date_str, rooms_data, memo):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+            
+            if success_count:
+                st.success(f"✅ {success_count}일 적용 완료!")
+                st.balloons()
+                # 매트릭스 세션 초기화 (다음에 새로 불러오도록)
+                if matrix_key in st.session_state:
+                    del st.session_state[matrix_key]
+                st.rerun()
+            if fail_count:
+                st.error(f"❌ {fail_count}일 저장 실패")
+    
+    with col2:
+        if st.button("🗑️ 적용 기록 삭제", use_container_width=True, key="apply_delete_btn"):
+            del_count = 0
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                if delete_applied_rate(date_str):
+                    del_count += 1
+            if del_count:
+                st.success(f"🗑️ {del_count}일 삭제됨")
+                if matrix_key in st.session_state:
+                    del st.session_state[matrix_key]
+                st.rerun()
 
 # --- 4-D. 채널 판매가 (적용가 기준) ---
 def render_channel_sale_table(current_df, ch_name, applied_rates):
@@ -938,40 +956,7 @@ with st.sidebar:
             st.success("저장 완료!")
 
 # --- 7. 파일 로직 (스마트 병합) ---
-# 업로드 확인 플래그 (초기화 경고 + 확인)
-if files and 'file_upload_confirmed' not in st.session_state:
-    # 기존 오버라이드(applied_rates) 확인
-    existing_applied = load_applied_rates()
-    has_overrides = any(existing_applied.values())
-    
-    if has_overrides:
-        st.warning(f"""
-        ⚠️ **파일 업로드 감지됨**
-        
-        현재 적용(오버라이드) 기록 **{len(existing_applied)}개**가 있습니다.
-        새 파일 업로드 시 **모든 오버라이드가 초기화**됩니다 (권장 BAR 기준으로 자동 리셋).
-        
-        계속 진행하시겠습니까?
-        """)
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            if st.button("✅ 초기화 후 업로드 진행", type="primary", use_container_width=True):
-                # 모든 적용 기록 삭제
-                for date_str in existing_applied.keys():
-                    delete_applied_rate(date_str)
-                st.session_state.file_upload_confirmed = True
-                st.cache_data.clear()
-                st.rerun()
-        with col_c2:
-            if st.button("❌ 취소", use_container_width=True):
-                st.session_state.file_upload_confirmed = False
-                st.stop()
-        st.stop()
-    else:
-        # 오버라이드 없으면 바로 진행
-        st.session_state.file_upload_confirmed = True
-
-if files and st.session_state.get('file_upload_confirmed'):
+if files:
     new_extracted = []
     ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
 
@@ -1005,9 +990,6 @@ if files and st.session_state.get('file_upload_confirmed'):
         else:
             combined = pd.concat([new_df, st.session_state.today_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
             st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
-    
-    # 업로드 완료 후 플래그 리셋 (다음 업로드 대비)
-    st.session_state.file_upload_confirmed = False
 
 # --- 8. 메인 출력 ---
 if not st.session_state.today_df.empty:
@@ -1040,9 +1022,9 @@ if not st.session_state.today_df.empty:
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-        # --- 4번 표: CMS 적용 현황 종합 ---
+        # --- 4번 표: 권장 vs 적용 비교 ---
         applied_rates_data = load_applied_rates()
-        st.markdown(render_applied_vs_recommend_table(curr_filtered, prev_filtered, applied_rates_data), unsafe_allow_html=True)
+        st.markdown(render_applied_vs_recommend_table(curr_filtered, applied_rates_data), unsafe_allow_html=True)
 
         # --- 5번: 요금 적용 UI (항상 전체 날짜 대상, 자체 필터링) ---
         render_apply_rate_ui(curr, applied_rates_data)
