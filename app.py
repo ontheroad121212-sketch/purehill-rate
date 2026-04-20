@@ -266,6 +266,170 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table></div>"
     return html
 
+# --- 4-A. 적용 요금 관리 (applied_rates) ---
+@st.cache_data(ttl=60)
+def load_applied_rates():
+    """Firebase에서 적용 이력 로드. 키는 'YYYY-MM-DD' 형식"""
+    try:
+        docs = db.collection("applied_rates").stream()
+        result = {}
+        for doc in docs:
+            d = doc.to_dict()
+            result[doc.id] = d
+        return result
+    except Exception:
+        return {}
+
+def save_applied_rate(target_date_str, applied_data, memo=""):
+    """
+    특정 날짜에 적용된 요금 저장
+    target_date_str: '2026-04-25' 형식
+    applied_data: {'FDB': 'BAR5', 'FDE': 'BAR5', ...}
+    """
+    try:
+        db.collection("applied_rates").document(target_date_str).set({
+            'applied_date': target_date_str,
+            'applied_at': datetime.now().isoformat(),
+            'applied_at_display': datetime.now().strftime("%Y-%m-%d %H:%M"),
+            'memo': memo,
+            'rooms': applied_data,
+        })
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"적용 저장 실패: {e}")
+        return False
+
+def delete_applied_rate(target_date_str):
+    try:
+        db.collection("applied_rates").document(target_date_str).delete()
+        st.cache_data.clear()
+        return True
+    except:
+        return False
+
+def get_applied_bar(target_date_str, room_id, applied_rates):
+    """해당 날짜+객실의 적용 BAR 반환. 없으면 None"""
+    day_data = applied_rates.get(target_date_str, {})
+    rooms = day_data.get('rooms', {})
+    return rooms.get(room_id)
+
+def get_bar_price(room_id, bar):
+    """BAR 문자열로 가격 조회"""
+    if bar == "BAR0":
+        if room_id in DYNAMIC_ROOMS:
+            return PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
+        else:
+            return FIXED_BAR0_TABLE.get(room_id, 0)
+    if room_id in DYNAMIC_ROOMS:
+        return PRICE_TABLE.get(room_id, {}).get(bar, 0)
+    else:
+        return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+
+# --- 4-B. 권장 vs 적용 비교 표 ---
+def render_applied_vs_recommend_table(current_df, applied_rates):
+    """날짜별 × 객실별 권장 vs 적용 비교"""
+    if current_df.empty:
+        return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
+
+    dates = sorted(current_df['Date'].unique())
+    
+    html = """
+    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
+                padding:10px; background:#f0f2f6; border-left:10px solid #1976D2;'>
+        🎯 4. 권장 vs 적용 비교 (CMS 관리용)
+    </div>
+    <div style='padding:10px; background:#E3F2FD; border-radius:6px; margin-bottom:15px; font-size:12px;'>
+        🔴 권장 ≠ 적용 (놓친 날)  |  🟢 권장 = 적용 (잘 반영됨)  |  ⚪ 적용 대기중
+    </div>
+    """
+    
+    html += "<div style='overflow-x:auto; white-space:nowrap; border:1px solid #ddd;'>"
+    html += "<table style='width:100%; border-collapse:collapse; font-size:12px; min-width:1100px;'>"
+    html += "<thead><tr style='background:#1a1a2e; color:white;'>"
+    html += "<th style='border:1px solid #444; padding:8px; width:90px; position:sticky; left:0; background:#1a1a2e; z-index:2;'>날짜</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:60px;'>객실</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:130px;'>🎯 권장</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:180px;'>⭐ 적용 (실제 CMS)</th>"
+    html += "<th style='border:1px solid #444; padding:8px;'>📝 메모</th>"
+    html += "<th style='border:1px solid #444; padding:8px; width:100px;'>⏰ 반영일</th>"
+    html += "</tr></thead><tbody>"
+
+    # Dynamic 객실만 비교 대상 (Fixed는 고정가라 제외)
+    for d in dates:
+        date_str = d.strftime('%Y-%m-%d')
+        applied_info = applied_rates.get(date_str, {})
+        applied_rooms = applied_info.get('rooms', {})
+        memo = applied_info.get('memo', '')
+        applied_at = applied_info.get('applied_at_display', '')
+        
+        wd = WEEKDAYS_KR[d.weekday()]
+        wd_color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
+        
+        # Dynamic 객실별로 한 줄씩
+        for idx, rid in enumerate(DYNAMIC_ROOMS):
+            curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            if curr_match.empty:
+                continue
+            
+            avail = curr_match.iloc[0]['Available']
+            total = curr_match.iloc[0]['Total']
+            _, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
+            
+            applied_bar = applied_rooms.get(rid)
+            
+            # 상태 판단
+            if applied_bar is None:
+                status_color = "#F5F5F5"
+                applied_display = "<span style='color:#999;'>⚪ 대기중</span>"
+                applied_price_display = "<span style='color:#aaa; font-size:11px;'>미적용</span>"
+                row_bg = "#FAFAFA"
+            elif applied_bar == rec_bar:
+                status_color = "#E8F5E9"
+                applied_price = get_bar_price(rid, applied_bar)
+                applied_display = f"<b style='color:#2E7D32; font-size:18px;'>⭐ {applied_bar}</b>"
+                applied_price_display = f"<span style='color:#2E7D32; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
+                row_bg = "#F1F8E9"
+            else:
+                status_color = "#FFEBEE"
+                applied_price = get_bar_price(rid, applied_bar)
+                applied_display = f"<b style='color:#C62828; font-size:18px;'>⭐ {applied_bar}</b>"
+                applied_price_display = f"<span style='color:#C62828; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
+                row_bg = "#FFF3F3"
+            
+            # 첫 번째 객실 줄에만 날짜 표시
+            if idx == 0:
+                date_cell = f"""<td rowspan='{len(DYNAMIC_ROOMS)}' 
+                    style='border:1px solid #ddd; padding:8px; background:{status_color}; 
+                    position:sticky; left:0; text-align:center; vertical-align:top; font-weight:bold;'>
+                    <div style='font-size:14px;'>{d.strftime('%m-%d')}</div>
+                    <div style='color:{wd_color}; font-size:13px;'>({wd})</div>
+                </td>"""
+            else:
+                date_cell = ""
+            
+            memo_display = memo if memo else "-"
+            applied_at_display_txt = applied_at[:10] if applied_at else "-"
+            
+            html += f"<tr style='background:{row_bg};'>"
+            html += date_cell
+            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; font-weight:bold;'>{rid}</td>"
+            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center;'>"
+            html += f"<div style='color:#555;'>{rec_bar}</div>"
+            html += f"<div style='color:#777; font-size:11px;'>{rec_price:,}원</div>"
+            html += f"</td>"
+            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; background:{status_color};'>"
+            html += f"{applied_display}<br>{applied_price_display}"
+            html += f"</td>"
+            # 메모/반영일은 날짜 기준이므로 첫 줄에만
+            if idx == 0:
+                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; font-size:11px;'>{memo_display}</td>"
+                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; text-align:center; font-size:11px;'>{applied_at_display_txt}</td>"
+            html += "</tr>"
+
+    html += "</tbody></table></div>"
+    return html
+
 # --- 5. 파서 및 DB 로직 ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
@@ -463,6 +627,13 @@ if not st.session_state.today_df.empty:
     st.markdown(render_master_table(curr, prev, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
     st.markdown(render_master_table(curr, prev, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
+
+    # --- 4번 표: 권장 vs 적용 비교 ---
+    applied_rates_data = load_applied_rates()
+    st.markdown(render_applied_vs_recommend_table(curr, applied_rates_data), unsafe_allow_html=True)
+
+    # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
+    with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
 
     # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
     with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
