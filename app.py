@@ -159,7 +159,7 @@ def filter_df_by_dates(df, visible_dates):
     return df[df['Date'].isin(visible_dates)].copy()
 
 # --- 4. 렌더러 ---
-def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준"):
+def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준", applied_rates=None):
     if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
     
@@ -181,7 +181,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     if mode == "판매가" and not items_to_show:
         return f"<div style='padding:10px; color:gray;'>👉 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
 
-    html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:#f0f2f6; border-left:10px solid #000;'>{title}</div>"
+    bg_title_color = "#E3F2FD" if mode == "최종결과" else "#f0f2f6"
+    border_title_color = "#1976D2" if mode == "최종결과" else "#000"
+
+    html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:{bg_title_color}; border-left:10px solid {border_title_color};'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
     html += f"<table style='width:100%; border-collapse:collapse; font-size:{font_size}; min-width:1000px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:180px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:{header_padding};'>객실/프로모션</th>"
     for d in dates: html += f"<th style='border:1px solid #ddd; padding:{header_padding}; {col_width_style}'>{d.strftime('%m-%d')}</th>"
@@ -238,6 +241,20 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 style += f"background-color: {bg};"
                 # 기준 모드에서는 원본 데이터 표시만 수행 (is_manual 분기 제거)
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                
+            elif mode == "최종결과":
+                # 1-A 모드: 시스템 권장가(bar) 위에 전략 적용가(applied_bar)를 덮어씌워서 렌더링
+                applied_bar = applied_rates.get(d.strftime('%Y-%m-%d'), {}).get('rooms', {}).get(rid) if applied_rates else None
+                final_bar = applied_bar if applied_bar else bar
+                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
+                
+                if applied_bar:
+                    final_price = get_bar_price(rid, final_bar)
+                    style += f"background-color: {bg}; border: 2.5px solid #2E7D32;"
+                    content = f"⭐ <b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
+                else:
+                    style += f"background-color: {bg}; opacity: 0.9;"
+                    content = f"<b>{final_bar}</b><br>{base_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
@@ -356,7 +373,7 @@ def get_bar_price(room_id, bar):
 
 # --- 4-B. 권장 vs 적용 비교 표 ---
 def render_applied_vs_recommend_table(current_df, applied_rates):
-    """날짜별 × 객실별 권장 vs 적용 비교"""
+    """날짜별 × 객실별 권장 vs 적용 비교 (가로 스크롤 매트릭스 형태로 재작성)"""
     if current_df.empty:
         return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
 
@@ -364,97 +381,60 @@ def render_applied_vs_recommend_table(current_df, applied_rates):
     
     html = """
     <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
-                padding:10px; background:#f0f2f6; border-left:10px solid #1976D2;'>
-        🎯 4. 권장 vs 적용 비교 (CMS 관리용)
-    </div>
-    <div style='padding:10px; background:#E3F2FD; border-radius:6px; margin-bottom:15px; font-size:12px;'>
-        🔴 권장 ≠ 적용 (놓친 날)  |  🟢 권장 = 적용 (잘 반영됨)  |  ⚪ 적용 대기중
+                padding:10px; background:#f0f2f6; border-left:10px solid #FF8F00;'>
+        🔍 4. 권장 vs 적용 비교 대조표 (CMS 관리용)
     </div>
     """
     
     html += "<div style='overflow-x:auto; white-space:nowrap; border:1px solid #ddd;'>"
-    html += "<table style='width:100%; border-collapse:collapse; font-size:12px; min-width:1100px;'>"
-    html += "<thead><tr style='background:#1a1a2e; color:white;'>"
-    html += "<th style='border:1px solid #444; padding:8px; width:90px; position:sticky; left:0; background:#1a1a2e; z-index:2;'>날짜</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:60px;'>객실</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:130px;'>🎯 권장</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:180px;'>⭐ 적용 (실제 CMS)</th>"
-    html += "<th style='border:1px solid #444; padding:8px;'>📝 메모</th>"
-    html += "<th style='border:1px solid #444; padding:8px; width:100px;'>⏰ 반영일</th>"
+    html += "<table style='width:100%; border-collapse:collapse; font-size:11px; min-width:1000px;'>"
+    html += "<thead><tr style='background:#f9f9f9;'>"
+    html += "<th rowspan='2' style='border:1px solid #ddd; width:180px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:5px;'>객실</th>"
+    for d in dates: 
+        html += f"<th style='border:1px solid #ddd; padding:5px;'>{d.strftime('%m-%d')}</th>"
+    html += "</tr><tr style='background:#f9f9f9;'>"
+    for d in dates:
+        wd = WEEKDAYS_KR[d.weekday()]
+        color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
+        html += f"<th style='border:1px solid #ddd; padding:5px; color:{color};'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
-    # Dynamic 객실만 비교 대상 (Fixed는 고정가라 제외)
-    for d in dates:
-        date_str = d.strftime('%Y-%m-%d')
-        applied_info = applied_rates.get(date_str, {})
-        applied_rooms = applied_info.get('rooms', {})
-        memo = applied_info.get('memo', '')
-        applied_at = applied_info.get('applied_at_display', '')
+    # Dynamic 객실만 비교 대상
+    for rid in DYNAMIC_ROOMS:
+        html += f"<tr><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'><b>{rid}</b></td>"
         
-        wd = WEEKDAYS_KR[d.weekday()]
-        wd_color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
-        
-        # Dynamic 객실별로 한 줄씩
-        for idx, rid in enumerate(DYNAMIC_ROOMS):
+        for d in dates:
+            date_str = d.strftime('%Y-%m-%d')
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
+                html += "<td style='border:1px solid #ddd; padding:8px; text-align:center;'>-</td>"
                 continue
             
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            _, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
+            _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
             
-            applied_bar = applied_rooms.get(rid)
+            applied_info = applied_rates.get(date_str, {})
+            applied_bar = applied_info.get('rooms', {}).get(rid)
+            memo = applied_info.get('memo', '')
+            applied_at = applied_info.get('applied_at_display', '')
             
-            # 상태 판단
-            if applied_bar is None:
-                status_color = "#F5F5F5"
-                applied_display = "<span style='color:#999;'>⚪ 대기중</span>"
-                applied_price_display = "<span style='color:#aaa; font-size:11px;'>미적용</span>"
-                row_bg = "#FAFAFA"
+            # 메모를 툴팁으로 처리
+            memo_text = f"📝 메모: {memo} | ⏰ 반영: {applied_at}" if memo or applied_at else ""
+            tooltip = f"title='{memo_text}'" if memo_text else ""
+            
+            if not applied_bar:
+                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FAFAFA; color: #999;"
+                content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
             elif applied_bar == rec_bar:
-                status_color = "#E8F5E9"
-                applied_price = get_bar_price(rid, applied_bar)
-                applied_display = f"<b style='color:#2E7D32; font-size:18px;'>⭐ {applied_bar}</b>"
-                applied_price_display = f"<span style='color:#2E7D32; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
-                row_bg = "#F1F8E9"
+                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
+                content = f"✅ <b>{applied_bar}</b>"
             else:
-                status_color = "#FFEBEE"
-                applied_price = get_bar_price(rid, applied_bar)
-                applied_display = f"<b style='color:#C62828; font-size:18px;'>⭐ {applied_bar}</b>"
-                applied_price_display = f"<span style='color:#C62828; font-size:15px; font-weight:bold;'>{applied_price:,}원</span>"
-                row_bg = "#FFF3F3"
-            
-            # 첫 번째 객실 줄에만 날짜 표시
-            if idx == 0:
-                date_cell = f"""<td rowspan='{len(DYNAMIC_ROOMS)}' 
-                    style='border:1px solid #ddd; padding:8px; background:{status_color}; 
-                    position:sticky; left:0; text-align:center; vertical-align:top; font-weight:bold;'>
-                    <div style='font-size:14px;'>{d.strftime('%m-%d')}</div>
-                    <div style='color:{wd_color}; font-size:13px;'>({wd})</div>
-                </td>"""
-            else:
-                date_cell = ""
-            
-            memo_display = memo if memo else "-"
-            applied_at_display_txt = applied_at[:10] if applied_at else "-"
-            
-            html += f"<tr style='background:{row_bg};'>"
-            html += date_cell
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; font-weight:bold;'>{rid}</td>"
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center;'>"
-            html += f"<div style='color:#555;'>{rec_bar}</div>"
-            html += f"<div style='color:#777; font-size:11px;'>{rec_price:,}원</div>"
-            html += f"</td>"
-            html += f"<td style='border:1px solid #ddd; padding:8px; text-align:center; background:{status_color};'>"
-            html += f"{applied_display}<br>{applied_price_display}"
-            html += f"</td>"
-            # 메모/반영일은 날짜 기준이므로 첫 줄에만
-            if idx == 0:
-                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; font-size:11px;'>{memo_display}</td>"
-                html += f"<td rowspan='{len(DYNAMIC_ROOMS)}' style='border:1px solid #ddd; padding:8px; vertical-align:middle; text-align:center; font-size:11px;'>{applied_at_display_txt}</td>"
-            html += "</tr>"
-
+                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FFF3E0; color: #C62828; border: 1.5px dashed #FF8F00;"
+                content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
+                
+            html += f"<td style='{style}' {tooltip}>{content}</td>"
+        html += "</tr>"
     html += "</tbody></table></div>"
     return html
 
@@ -718,7 +698,7 @@ def render_apply_rate_ui(current_df, applied_rates):
 
 # --- 4-D. 채널 판매가 (적용가 기준) ---
 def render_channel_sale_table(current_df, ch_name, applied_rates):
-    """채널별 판매가 - 적용 BAR 기준"""
+    """채널별 판매가 - 시스템 권장가 베이스에 적용 BAR 덮어쓰기"""
     if current_df.empty:
         return ""
     
@@ -731,7 +711,7 @@ def render_channel_sale_table(current_df, ch_name, applied_rates):
     html = f"""
     <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
                 padding:10px; background:#E8F5E9; border-left:10px solid #2E7D32;'>
-        ✅ {ch_name} 판매가 산출 (적용가 기준)
+        ✅ {ch_name} 판매가 산출 (최종 동기화 반영)
     </div>
     """
     html += "<div style='overflow-x:auto; white-space:nowrap; border:1px solid #ddd;'>"
@@ -772,15 +752,16 @@ def render_channel_sale_table(current_df, ch_name, applied_rates):
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             
-            # 적용 BAR 우선, 없으면 권장 BAR
+            # 기본 시스템 권장가 확인
+            _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
+            
+            # 5번 섹션에서 수동 적용한 BAR 확인
             applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
             is_applied = applied_bar is not None
             
-            if is_applied:
-                base_price = get_bar_price(rid, applied_bar)
-                bar_used = applied_bar
-            else:
-                _, bar_used, base_price, _ = get_final_values(rid, d, avail, total)
+            # 최종 결정된 BAR와 기본 가격
+            final_bar = applied_bar if is_applied else rec_bar
+            base_price = get_bar_price(rid, final_bar)
             
             # 판매가 계산
             try:
@@ -788,12 +769,15 @@ def render_channel_sale_table(current_df, ch_name, applied_rates):
                 after_disc = b_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 
+                # 색상은 항상 시스템 권장가든 최종 확정가든 해당 BAR에 맞춰 출력
+                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
+                
                 if is_applied:
-                    style = "border:1px solid #ddd; padding:4px; text-align:center; background:#E8F5E9; color:#2E7D32; font-weight:bold;"
-                    content = f"⭐ {final_p:,}<br><span style='font-size:9px; color:#777;'>{bar_used}</span>"
+                    style = f"border:2px dashed #2E7D32; padding:4px; text-align:center; background:{bg}; font-weight:bold;"
+                    content = f"⭐ {final_p:,}<br><span style='font-size:9px;'>{final_bar}</span>"
                 else:
-                    style = "border:1px solid #ddd; padding:4px; text-align:center; background:#F5F5F5; color:#666;"
-                    content = f"{final_p:,}<br><span style='font-size:9px; color:#999;'>{bar_used} 권장</span>"
+                    style = f"border:1px solid #ddd; padding:4px; text-align:center; background:{bg};"
+                    content = f"{final_p:,}<br><span style='font-size:9px; color:#555;'>{final_bar}</span>"
                 
                 html += f"<td style='{style}'>{content}</td>"
             except:
@@ -1018,12 +1002,18 @@ if not st.session_state.today_df.empty:
     if curr_filtered.empty:
         st.warning("⚠️ 표시할 날짜가 없습니다. 위 체크박스를 활성화하거나 파일을 업로드하세요.")
     else:
-        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📊 1. 시장 분석", mode="기준"), unsafe_allow_html=True)
+        applied_rates_data = load_applied_rates()
+        
+        # 1. 시장 분석 (시스템 권장 요금)
+        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📊 1. 시장 분석 (시스템 권장 기준)", mode="기준"), unsafe_allow_html=True)
+        
+        # 1-A. 실제 최종 요금 판도 (시스템 권장에 전략적 수동 개입 덮어씌움)
+        st.markdown(render_master_table(curr_filtered, prev_filtered, applied_rates=applied_rates_data, title="🎯 1-A. 최종 확정 요금 상태 (시스템 + 전략 적용)", mode="최종결과"), unsafe_allow_html=True)
+
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-        # --- 4번 표: 권장 vs 적용 비교 ---
-        applied_rates_data = load_applied_rates()
+        # --- 4번 표: 권장 vs 적용 비교 (가로형 재작성) ---
         st.markdown(render_applied_vs_recommend_table(curr_filtered, applied_rates_data), unsafe_allow_html=True)
 
         # --- 5번: 요금 적용 UI (항상 전체 날짜 대상, 자체 필터링) ---
@@ -1064,12 +1054,12 @@ if not st.session_state.today_df.empty:
 
     st.divider()
 
-    # 채널 판매가도 필터 적용 + 적용가 기준 계산
+    # 채널 판매가도 필터 적용 + 적용가 기준 계산 (이지에디터)
     if st.session_state.channel_list:
         st.markdown("""
         <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
             💡 <b>채널 판매가는 '적용가(⭐)' 기준으로 계산됩니다.</b> 
-            적용 기록이 없는 날짜는 권장가로 계산됩니다.
+            적용 기록이 없는 날짜는 기본 시스템 권장가로 자동 계산 및 색상 표시됩니다.
         </div>
         """, unsafe_allow_html=True)
         
