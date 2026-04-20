@@ -243,18 +243,25 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
                 
             elif mode == "최종결과":
-                # 1-A 모드: 시스템 권장가(bar) 위에 전략 적용가(applied_bar)를 덮어씌워서 렌더링
-                applied_bar = applied_rates.get(d.strftime('%Y-%m-%d'), {}).get('rooms', {}).get(rid) if applied_rates else None
-                final_bar = applied_bar if applied_bar else bar
+                # [핵심] 수동 적용 BAR가 있으면 그걸 1순위로 가져옴
+                applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
+                is_applied = applied_bar is not None
+                
+                # 최종적으로 화면에 표시할 BAR 결정
+                final_bar = applied_bar if is_applied else bar
+                final_price = get_bar_price(rid, final_bar) if is_applied else base_price
+                
+                # [수정] 배경색을 최종 결정된 final_bar 기준으로 가져오도록 변경!
                 bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
                 
-                if applied_bar:
-                    final_price = get_bar_price(rid, final_bar)
-                    style += f"background-color: {bg}; border: 2.5px solid #2E7D32;"
+                if is_applied:
+                    # 수동 개입된 날은 굵은 초록 테두리와 별표(⭐)로 강조
+                    style += f"background-color: {bg}; border: 3px solid #2E7D32; font-weight: bold;"
                     content = f"⭐ <b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
                 else:
+                    # 수동 개입 없는 날은 평소처럼 출력 (투명도 살짝 줘서 구분)
                     style += f"background-color: {bg}; opacity: 0.9;"
-                    content = f"<b>{final_bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                    content = f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
             
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
