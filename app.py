@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import firebase_admin
 from firebase_admin import credentials, firestore
 import math
@@ -430,6 +430,195 @@ def render_applied_vs_recommend_table(current_df, applied_rates):
     html += "</tbody></table></div>"
     return html
 
+# --- 4-C. 요금 적용 UI (날짜 선택 + BAR 지정) ---
+def render_apply_rate_ui(current_df, applied_rates):
+    """날짜 찍어서 요금 적용하는 에디터"""
+    if current_df.empty:
+        return
+    
+    st.markdown("""
+    <div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; 
+                padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>
+        ⏰ 5. 요금 적용 (CMS 반영 기록)
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.caption("🔧 주 2회 요금 수정 시 사용. 날짜를 선택하고 각 객실의 BAR을 지정하세요.")
+    
+    dates = sorted(current_df['Date'].unique())
+    today = date.today()
+    
+    # 빠른 선택 옵션
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        quick_select = st.selectbox(
+            "빠른 선택",
+            ["직접 선택", "이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 Dynamic 객실 일괄"],
+            key="apply_quick_select"
+        )
+    
+    # 빠른 선택 로직
+    preset_dates = []
+    if quick_select == "이번 주 (월~일)":
+        monday = today - timedelta(days=today.weekday())
+        sunday = monday + timedelta(days=6)
+        preset_dates = [d for d in dates if monday <= d <= sunday]
+    elif quick_select == "다음 주":
+        monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
+        sunday = monday + timedelta(days=6)
+        preset_dates = [d for d in dates if monday <= d <= sunday]
+    elif quick_select == "이번 달 남은 날":
+        preset_dates = [d for d in dates if d >= today and d.month == today.month]
+    elif quick_select == "전체 Dynamic 객실 일괄":
+        preset_dates = [d for d in dates if d >= today]
+    
+    selected_dates = st.multiselect(
+        "✅ 적용할 날짜 선택 (여러 개 가능)",
+        options=dates,
+        default=preset_dates,
+        format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})",
+        key="apply_date_select"
+    )
+    
+    if not selected_dates:
+        st.info("👆 위에서 날짜를 먼저 선택하세요.")
+        return
+    
+    st.markdown(f"**선택됨: {len(selected_dates)}일**")
+    st.divider()
+    
+    # 적용 방식 선택
+    apply_mode = st.radio(
+        "적용 방식",
+        ["🎯 권장 BAR 그대로 적용 (일괄)", "✏️ 날짜별 개별 지정", "🔧 전체 객실 동일 BAR 지정"],
+        horizontal=True,
+        key="apply_mode_radio"
+    )
+    
+    # 객실별 BAR 입력 UI
+    applied_input = {}  # {date: {room_id: bar}}
+    
+    if apply_mode == "🎯 권장 BAR 그대로 적용 (일괄)":
+        st.info("💡 시스템이 계산한 권장 BAR이 그대로 적용됩니다. 가장 간편한 옵션.")
+        for d in selected_dates:
+            applied_input[d] = {}
+            for rid in DYNAMIC_ROOMS:
+                curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                if not curr_match.empty:
+                    _, rec_bar, _, _ = get_final_values(
+                        rid, d, 
+                        curr_match.iloc[0]['Available'], 
+                        curr_match.iloc[0]['Total']
+                    )
+                    applied_input[d][rid] = rec_bar
+        
+        # 미리보기
+        with st.expander("👁️ 적용 미리보기", expanded=False):
+            preview_html = "<table style='width:100%; border-collapse:collapse; font-size:12px;'>"
+            preview_html += "<tr style='background:#eee;'><th style='padding:5px; border:1px solid #ddd;'>날짜</th>"
+            for rid in DYNAMIC_ROOMS:
+                preview_html += f"<th style='padding:5px; border:1px solid #ddd;'>{rid}</th>"
+            preview_html += "</tr>"
+            for d in selected_dates:
+                preview_html += f"<tr><td style='padding:5px; border:1px solid #ddd;'>{d.strftime('%m-%d')} ({WEEKDAYS_KR[d.weekday()]})</td>"
+                for rid in DYNAMIC_ROOMS:
+                    bar = applied_input.get(d, {}).get(rid, "-")
+                    preview_html += f"<td style='padding:5px; border:1px solid #ddd; text-align:center; background:#E3F2FD; font-weight:bold;'>{bar}</td>"
+                preview_html += "</tr>"
+            preview_html += "</table>"
+            st.markdown(preview_html, unsafe_allow_html=True)
+    
+    elif apply_mode == "🔧 전체 객실 동일 BAR 지정":
+        st.info("💡 선택한 모든 날짜 × 모든 Dynamic 객실에 같은 BAR을 적용합니다.")
+        bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
+        unified_bar = st.selectbox("적용할 BAR", bar_options, index=4, key="unified_bar_select")
+        
+        for d in selected_dates:
+            applied_input[d] = {rid: unified_bar for rid in DYNAMIC_ROOMS}
+    
+    else:  # "✏️ 날짜별 개별 지정"
+        st.info("💡 각 날짜마다 객실별 BAR을 직접 지정할 수 있습니다.")
+        bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
+        
+        for d in selected_dates:
+            date_str = d.strftime('%Y-%m-%d')
+            wd = WEEKDAYS_KR[d.weekday()]
+            
+            with st.expander(f"📅 {date_str} ({wd})", expanded=len(selected_dates) <= 3):
+                applied_input[d] = {}
+                cols = st.columns(5)
+                for idx, rid in enumerate(DYNAMIC_ROOMS):
+                    with cols[idx]:
+                        # 권장 BAR 계산
+                        curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                        rec_bar = "BAR5"
+                        if not curr_match.empty:
+                            _, rec_bar, _, _ = get_final_values(
+                                rid, d,
+                                curr_match.iloc[0]['Available'],
+                                curr_match.iloc[0]['Total']
+                            )
+                        
+                        # 기존 적용값
+                        existing = applied_rates.get(date_str, {}).get('rooms', {}).get(rid, rec_bar)
+                        default_idx = bar_options.index(existing) if existing in bar_options else bar_options.index(rec_bar)
+                        
+                        selected_bar = st.selectbox(
+                            f"**{rid}**",
+                            bar_options,
+                            index=default_idx,
+                            key=f"bar_{date_str}_{rid}",
+                            help=f"권장: {rec_bar}"
+                        )
+                        applied_input[d][rid] = selected_bar
+                        
+                        # 권장과 다르면 경고
+                        if selected_bar != rec_bar:
+                            st.caption(f"⚠️ 권장 {rec_bar}")
+    
+    st.divider()
+    
+    # 메모
+    memo = st.text_area(
+        "📝 메모 (모든 선택된 날짜에 동일 적용)",
+        placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함",
+        key="apply_memo",
+        height=70
+    )
+    
+    # 저장 버튼
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("💾 선택한 날짜 모두 적용 저장", type="primary", use_container_width=True, key="apply_save_btn"):
+            success_count = 0
+            fail_count = 0
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                rooms_data = applied_input.get(d, {})
+                if rooms_data:
+                    if save_applied_rate(date_str, rooms_data, memo):
+                        success_count += 1
+                    else:
+                        fail_count += 1
+            
+            if success_count:
+                st.success(f"✅ {success_count}일 적용 완료! (메모: {memo if memo else '없음'})")
+                st.balloons()
+                st.rerun()
+            if fail_count:
+                st.error(f"❌ {fail_count}일 저장 실패")
+    
+    with col2:
+        if st.button("🗑️ 선택 날짜 적용 기록 삭제", use_container_width=True, key="apply_delete_btn"):
+            del_count = 0
+            for d in selected_dates:
+                date_str = d.strftime('%Y-%m-%d')
+                if delete_applied_rate(date_str):
+                    del_count += 1
+            if del_count:
+                st.success(f"🗑️ {del_count}일 적용 기록 삭제됨")
+                st.rerun()
+
 # --- 5. 파서 및 DB 로직 ---
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
@@ -631,6 +820,9 @@ if not st.session_state.today_df.empty:
     # --- 4번 표: 권장 vs 적용 비교 ---
     applied_rates_data = load_applied_rates()
     st.markdown(render_applied_vs_recommend_table(curr, applied_rates_data), unsafe_allow_html=True)
+
+    # --- 5번: 요금 적용 UI ---
+    render_apply_rate_ui(curr, applied_rates_data)
 
     # === [수정 사항] 판도 직접 수정을 비밀스럽게 숨김 (Expander) ===
     with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
