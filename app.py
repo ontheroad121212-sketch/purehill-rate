@@ -427,7 +427,16 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
     if prev_applied_rates is None:
         prev_applied_rates = applied_rates  # 안전 기본값
     
-    use_focus = bool(focus_dates)  # 선택된 날짜 있으면 포커스 모드
+    # ★ focus_dates 정규화 - pd.Timestamp / date 혼용 방지
+    use_focus = bool(focus_dates)
+    if use_focus:
+        normalized_focus = set()
+        for fd in focus_dates:
+            if hasattr(fd, 'date') and callable(getattr(fd, 'date', None)):
+                normalized_focus.add(fd.date())
+            else:
+                normalized_focus.add(fd)
+        focus_dates = normalized_focus
 
     dates = sorted(current_df['Date'].unique())
     
@@ -481,7 +490,8 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 continue
             
             # ★ 포커스 모드: 5번에서 선택한 날짜 외에는 회색 처리
-            if use_focus and d not in focus_dates:
+            d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
+            if use_focus and d_key not in focus_dates:
                 avail_o = curr_match.iloc[0]['Available']
                 total_o = curr_match.iloc[0]['Total']
                 _, rec_bar_o, _, _ = get_final_values(rid, d, avail_o, total_o)
@@ -627,8 +637,15 @@ def render_apply_rate_ui(current_df, applied_rates):
         pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns(5)
         
         def add_to_picked(new_dates):
-            """선택된 날짜들을 누적 set에 추가 (필터된 dates 안에 있는 것만)"""
-            valid = [d for d in new_dates if d in dates]
+            """선택된 날짜들을 누적 set에 추가 (필터된 dates 안에 있는 것만, date 객체로 정규화)"""
+            valid = []
+            for d in new_dates:
+                if d in dates:
+                    # pd.Timestamp → datetime.date 정규화
+                    if hasattr(d, 'date') and callable(getattr(d, 'date', None)):
+                        valid.append(d.date())
+                    else:
+                        valid.append(d)
             st.session_state['_picked_dates'].update(valid)
         
         with pcol1:
@@ -951,8 +968,16 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
     if prev_applied_rates is None:
         prev_applied_rates = applied_rates  # 안전 기본값
     
-    # focus_dates: 비어있거나 None이면 전체 활성, 있으면 그 날짜만 색칠
-    use_focus = bool(focus_dates)  # 비어있는 set이면 False (=전체 색칠)
+    # ★ focus_dates 정규화 - pd.Timestamp / date 혼용 방지
+    use_focus = bool(focus_dates)
+    if use_focus:
+        normalized_focus = set()
+        for fd in focus_dates:
+            if hasattr(fd, 'date') and callable(getattr(fd, 'date', None)):
+                normalized_focus.add(fd.date())
+            else:
+                normalized_focus.add(fd)
+        focus_dates = normalized_focus
     
     dates = sorted(current_df['Date'].unique())
     
@@ -1038,7 +1063,8 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                 
                 # ★ 포커스 모드: 사용자가 5번에서 특정 날짜를 선택했다면
                 #    그 날짜 외에는 무조건 회색 처리 (눈에 안 띄게)
-                is_out_of_focus = use_focus and (d not in focus_dates)
+                d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
+                is_out_of_focus = use_focus and (d_key not in focus_dates)
                 
                 # --- 시각화 로직 ---
                 if is_out_of_focus or (highlight_only_changes and is_calm):
