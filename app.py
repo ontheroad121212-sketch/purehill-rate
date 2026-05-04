@@ -562,54 +562,137 @@ def render_apply_rate_ui(current_df, applied_rates):
             return st.success("✅ 재검토가 필요한 날짜가 없습니다.")
         return st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
     
-    # ---------- 빠른 날짜 선택 ----------
-    st.markdown("##### 📅 적용할 날짜 선택")
-    col_a, col_b = st.columns([2, 1])
-    with col_a:
-        quick_select = st.selectbox("빠른 날짜 선택", 
-            ["이번 주 (월~일)", "다음 주", "이번 달 남은 날", "전체 (필터된)", "직접 선택"], 
-            key="apply_quick_select")
+    # ---------- 누적 날짜 선택 (NEW: 기간+기간, 기간+일자 자유 조합) ----------
+    st.markdown("##### 📅 적용할 날짜 누적 선택")
+    st.caption("💡 아래 도구로 기간/일자를 **추가**하면 누적됩니다. 기간+기간, 기간+일자, 일자+일자 자유 조합 가능!")
     
-    preset_dates = []
-    if quick_select == "이번 주 (월~일)":
-        monday = today - timedelta(days=today.weekday())
-        preset_dates = [d for d in dates if monday <= d <= monday + timedelta(days=6)]
-    elif quick_select == "다음 주":
-        monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
-        preset_dates = [d for d in dates if monday <= d <= monday + timedelta(days=6)]
-    elif quick_select == "이번 달 남은 날":
-        preset_dates = [d for d in dates if d >= today and d.month == today.month]
-    elif quick_select == "전체 (필터된)":
-        preset_dates = list(dates)
+    # 누적 선택 저장소
+    if '_picked_dates' not in st.session_state:
+        st.session_state['_picked_dates'] = set()
     
-    # ---------- 기간(범위) 선택 (NEW) ----------
-    with st.expander("📆 기간으로 선택 (시작일 ~ 종료일)", expanded=False):
+    # ---------- [도구 1] 빠른 프리셋 추가 ----------
+    with st.container(border=True):
+        st.markdown("**🎯 빠른 프리셋 (클릭 시 누적 추가)**")
+        pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns(5)
+        
+        def add_to_picked(new_dates):
+            """선택된 날짜들을 누적 set에 추가 (필터된 dates 안에 있는 것만)"""
+            valid = [d for d in new_dates if d in dates]
+            st.session_state['_picked_dates'].update(valid)
+        
+        with pcol1:
+            if st.button("➕ 이번 주", use_container_width=True, key="preset_thisweek"):
+                monday = today - timedelta(days=today.weekday())
+                add_to_picked([d for d in dates if monday <= d <= monday + timedelta(days=6)])
+                st.rerun()
+        with pcol2:
+            if st.button("➕ 다음 주", use_container_width=True, key="preset_nextweek"):
+                monday = today - timedelta(days=today.weekday()) + timedelta(days=7)
+                add_to_picked([d for d in dates if monday <= d <= monday + timedelta(days=6)])
+                st.rerun()
+        with pcol3:
+            if st.button("➕ 이번 달 남은 날", use_container_width=True, key="preset_thismonth"):
+                add_to_picked([d for d in dates if d >= today and d.month == today.month])
+                st.rerun()
+        with pcol4:
+            if st.button("➕ 전체 (필터된)", use_container_width=True, key="preset_all"):
+                add_to_picked(list(dates))
+                st.rerun()
+        with pcol5:
+            if st.button("🗑️ 전체 비우기", use_container_width=True, key="preset_clear"):
+                st.session_state['_picked_dates'] = set()
+                # matrix 캐시도 함께 정리
+                for k in list(st.session_state.keys()):
+                    if k.startswith("apply_matrix_data_"):
+                        del st.session_state[k]
+                st.rerun()
+    
+    # ---------- [도구 2] 기간 추가 ----------
+    with st.container(border=True):
+        st.markdown("**📆 기간 추가 (시작일 ~ 종료일)** — 여러 번 누르면 여러 기간 누적!")
         rc1, rc2, rc3 = st.columns([2, 2, 1])
         with rc1:
-            range_start = st.date_input("시작일", value=dates[0] if dates else today, 
-                                         min_value=dates[0] if dates else today, 
-                                         max_value=dates[-1] if dates else today, 
+            range_start = st.date_input("시작일", value=dates[0], 
+                                         min_value=dates[0], 
+                                         max_value=dates[-1], 
                                          key="apply_range_start")
         with rc2:
-            range_end = st.date_input("종료일", value=dates[-1] if dates else today, 
-                                       min_value=dates[0] if dates else today, 
-                                       max_value=dates[-1] if dates else today, 
+            range_end = st.date_input("종료일", value=dates[-1], 
+                                       min_value=dates[0], 
+                                       max_value=dates[-1], 
                                        key="apply_range_end")
         with rc3:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("📌 기간 적용", use_container_width=True, key="apply_range_btn"):
-                preset_dates = [d for d in dates if range_start <= d <= range_end]
-                st.session_state['_range_preset'] = preset_dates
+            if st.button("➕ 이 기간 추가", use_container_width=True, key="apply_range_btn", type="primary"):
+                if range_start > range_end:
+                    st.error("시작일이 종료일보다 늦습니다.")
+                else:
+                    new_dates = [d for d in dates if range_start <= d <= range_end]
+                    add_to_picked(new_dates)
+                    st.rerun()
+    
+    # ---------- [도구 3] 개별 일자 추가 ----------
+    with st.container(border=True):
+        st.markdown("**📍 개별 일자 추가** — 점 찍듯이 골라서 누적!")
+        ic1, ic2 = st.columns([3, 1])
+        with ic1:
+            single_pick = st.multiselect(
+                "추가할 일자 선택 (여러 개 한번에 가능)",
+                options=dates,
+                format_func=lambda d: f"{d.strftime('%m-%d')} ({WEEKDAYS_KR[d.weekday()]})",
+                key="apply_single_pick",
+                label_visibility="collapsed"
+            )
+        with ic2:
+            if st.button("➕ 일자 추가", use_container_width=True, key="apply_single_add", type="primary"):
+                if single_pick:
+                    add_to_picked(single_pick)
+                    # 입력칸 비우기
+                    if "apply_single_pick" in st.session_state:
+                        del st.session_state["apply_single_pick"]
+                    st.rerun()
+                else:
+                    st.warning("일자를 먼저 선택하세요.")
+    
+    # ---------- [최종] 선택된 날짜 확인 + 미세조정 ----------
+    selected_dates = sorted(st.session_state['_picked_dates'])
+    
+    if not selected_dates:
+        return st.info("👆 위 도구로 날짜를 먼저 추가하세요. (기간/일자/프리셋 자유 조합)")
+    
+    # 선택 결과를 보기 좋게 칩 형태로 표시
+    chips_html = "".join([
+        f"<span style='background:#E3F2FD; border:1px solid #1976D2; color:#0D47A1; "
+        f"padding:3px 8px; border-radius:12px; margin:2px; font-size:11px; "
+        f"display:inline-block; font-weight:bold;'>"
+        f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})</span>"
+        for d in selected_dates
+    ])
+    st.markdown(f"""
+    <div style='background:#F5F5F5; padding:8px 12px; border-radius:8px; margin:8px 0;
+                border-left:4px solid #1976D2;'>
+        <b style='color:#1976D2;'>✅ 누적 선택된 날짜 ({len(selected_dates)}일):</b><br>
+        {chips_html}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 개별 제거(미세조정)
+    with st.expander("🔧 누적 목록 미세 조정 (제거하고 싶은 날짜 체크 해제)", expanded=False):
+        adjusted = st.multiselect(
+            "최종 적용할 날짜 (체크 해제하면 제외)",
+            options=selected_dates,
+            default=selected_dates,
+            format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})",
+            key="apply_date_finetune"
+        )
+        if len(adjusted) != len(selected_dates):
+            if st.button("✂️ 위 조정 사항 적용", key="apply_finetune_apply"):
+                st.session_state['_picked_dates'] = set(adjusted)
+                for k in list(st.session_state.keys()):
+                    if k.startswith("apply_matrix_data_"):
+                        del st.session_state[k]
                 st.rerun()
     
-    if '_range_preset' in st.session_state:
-        preset_dates = st.session_state.pop('_range_preset')
-    
-    selected_dates = st.multiselect("✅ 적용할 날짜 (여러 개 가능)", 
-                                     options=dates, 
-                                     default=preset_dates, 
-                                     format_func=lambda d: f"{d.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[d.weekday()]})", 
-                                     key="apply_date_select")
     if not selected_dates: return st.info("👆 위에서 날짜를 먼저 선택하세요.")
     
     bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
@@ -782,7 +865,11 @@ def render_apply_rate_ui(current_df, applied_rates):
                         fail_count += 1
             if success_count:
                 st.success(f"✅ {success_count}일 적용 완료!")
-                if matrix_key in st.session_state: del st.session_state[matrix_key]
+                # 매트릭스 + 누적 목록 모두 정리
+                for k in list(st.session_state.keys()):
+                    if k.startswith("apply_matrix_data_"):
+                        del st.session_state[k]
+                st.session_state['_picked_dates'] = set()
                 st.rerun()
     with col2:
         if st.button("🗑️ 선택일 적용 기록 해제", use_container_width=True, key="apply_delete_btn"):
@@ -792,7 +879,10 @@ def render_apply_rate_ui(current_df, applied_rates):
                 if delete_applied_rate(date_str): del_count += 1
             if del_count:
                 st.success(f"🗑️ {del_count}일 수동 적용 해제됨 (시스템 권장가로 원복)")
-                if matrix_key in st.session_state: del st.session_state[matrix_key]
+                for k in list(st.session_state.keys()):
+                    if k.startswith("apply_matrix_data_"):
+                        del st.session_state[k]
+                st.session_state['_picked_dates'] = set()
                 st.rerun()
                 
 # --- 4-D. 채널 판매가 (적용가 기준 + 판도변화 버그 수정) ---
