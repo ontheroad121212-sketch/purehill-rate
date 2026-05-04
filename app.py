@@ -491,22 +491,18 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             # 재검토 필요 여부
             needs_review = bool(applied_bar and rec_at_apply and rec_at_apply != rec_bar)
             
-            # ★ 어제 최종가 vs 오늘 최종가 비교 (판도 변화 판단)
-            final_bar_today = applied_bar if applied_bar else rec_bar
-            prev_final_bar = None
-            prev_applied_bar = prev_applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-            if prev_applied_bar:
-                prev_final_bar = prev_applied_bar
-            elif prev_df is not None and not prev_df.empty:
+            # ★ [수정] 3번 판도변화 표와 동일한 로직: 어제 시스템 권장 vs 오늘 시스템 권장
+            prev_rec_bar = None
+            if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
-                    prev_final_bar = prev_rec_bar
             
-            is_trend_changed = (prev_final_bar is not None and 
-                                str(prev_final_bar).strip() != str(final_bar_today).strip())
+            # 시스템 권장값이 어제와 다른가? (= 3번 표의 ▲ 표시 기준)
+            is_trend_changed = (prev_rec_bar is not None and 
+                                str(prev_rec_bar).strip() != str(rec_bar).strip())
             
-            # ★ '평온한 셀' 판단: 적용=권장 + 재검토 불필요 + 어제와 동일
+            # ★ '평온한 셀' 판단: 권장값이 어제와 같음 + 재검토 불필요 + 적용=권장
             is_calm = (applied_bar and 
                        applied_bar == rec_bar and 
                        not needs_review and 
@@ -517,7 +513,7 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             if memo: tip_parts.append(f"📝 {memo}")
             if applied_at: tip_parts.append(f"⏰ {applied_at}")
             if needs_review: tip_parts.append(f"⚠️ 적용시점 권장: {rec_at_apply} → 현재 권장: {rec_bar}")
-            if is_trend_changed: tip_parts.append(f"▲ 어제 최종가: {prev_final_bar} → 오늘: {final_bar_today}")
+            if is_trend_changed: tip_parts.append(f"▲ 어제 권장: {prev_rec_bar} → 오늘 권장: {rec_bar}")
             memo_text = " | ".join(tip_parts)
             tooltip = f"title='{memo_text}'" if memo_text else ""
             
@@ -537,7 +533,7 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 elif is_trend_changed:
                     # 어제와 다름: 진한 초록 + ▲
                     style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
-                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>어제 {prev_final_bar}</span>"
+                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>어제 권장 {prev_rec_bar}</span>"
                 else:
                     # 토글 OFF 일 때 평온한 셀 (기존 방식)
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
@@ -997,23 +993,16 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
             final_bar = applied_bar if is_applied else rec_bar
             base_price = get_bar_price(rid, final_bar)
             
-            # 3. 어제의 최종 BAR 계산 (★ 핵심 버그 수정 ★)
-            #    - 어제도 오버라이드가 있었으면 그 값을, 없었으면 어제 시스템 권장값을 사용
-            prev_final_bar = None
-            prev_applied_bar = prev_applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-            
-            if prev_applied_bar:
-                prev_final_bar = prev_applied_bar
-            elif prev_df is not None and not prev_df.empty:
+            # 3. ★ [수정] 3번 판도변화 표와 동일한 로직: 어제 시스템 권장 vs 오늘 시스템 권장
+            prev_rec_bar = None
+            if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
-                    prev_final_bar = prev_rec_bar
             
-            # 판도 변화 = 어제 최종가 != 오늘 최종가
-            curr_b_str = str(final_bar).strip() if final_bar else ""
-            prev_b_str = str(prev_final_bar).strip() if prev_final_bar else ""
-            is_trend_changed = (prev_final_bar is not None and prev_b_str != curr_b_str)
+            # 시스템 권장값이 어제와 다른가? (= 3번 표 ▲ 표시 기준)
+            is_trend_changed = (prev_rec_bar is not None and 
+                                str(prev_rec_bar).strip() != str(rec_bar).strip())
             
             # 재검토 필요 여부
             needs_review = False
