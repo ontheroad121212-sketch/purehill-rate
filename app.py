@@ -513,7 +513,7 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             if memo: tip_parts.append(f"📝 {memo}")
             if applied_at: tip_parts.append(f"⏰ {applied_at}")
             if needs_review: tip_parts.append(f"⚠️ 적용시점 권장: {rec_at_apply} → 현재 권장: {rec_bar}")
-            if is_trend_changed: tip_parts.append(f"▲ 어제 권장: {prev_rec_bar} → 오늘 권장: {rec_bar}")
+            if is_trend_changed: tip_parts.append(f"▲ 이전 권장: {prev_rec_bar} → 현재 권장: {rec_bar}")
             memo_text = " | ".join(tip_parts)
             tooltip = f"title='{memo_text}'" if memo_text else ""
             
@@ -533,7 +533,7 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 elif is_trend_changed:
                     # 어제와 다름: 진한 초록 + ▲
                     style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
-                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>어제 권장 {prev_rec_bar}</span>"
+                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>이전 {prev_rec_bar}</span>"
                 else:
                     # 토글 OFF 일 때 평온한 셀 (기존 방식)
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
@@ -923,10 +923,11 @@ def render_apply_rate_ui(current_df, applied_rates):
                 st.rerun()
                 
 # --- 4-D. 채널 판매가 (적용가 기준 + 판도변화 버그 수정) ---
-def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None, highlight_only_changes=True):
-    """채널별 판매가 - 어제 최종가 vs 오늘 최종가 비교로 판도 변화 정확하게 계산
+def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None, highlight_only_changes=True, focus_dates=None):
+    """채널별 판매가 - 시스템 권장값 변화 기준 + 선택 날짜 포커스
     
-    highlight_only_changes=True: 변동 없는 평온한 셀은 흐리게 처리 (눈에 잘 안 띄게)
+    highlight_only_changes=True: 변동 없는 평온한 셀은 흐리게 처리
+    focus_dates: 선택된 날짜 set (None이면 전체 활성, 비어있지 않으면 해당 날짜만 활성)
     """
     if current_df.empty:
         return ""
@@ -937,6 +938,9 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
     
     if prev_applied_rates is None:
         prev_applied_rates = applied_rates  # 안전 기본값
+    
+    # focus_dates: 비어있거나 None이면 전체 활성, 있으면 그 날짜만 색칠
+    use_focus = bool(focus_dates)  # 비어있는 set이면 False (=전체 색칠)
     
     dates = sorted(current_df['Date'].unique())
     
@@ -1020,12 +1024,17 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                            not needs_review and 
                            not is_strategic_override)
                 
+                # ★ 포커스 모드: 사용자가 5번에서 특정 날짜를 선택했다면
+                #    그 날짜 외에는 무조건 회색 처리 (눈에 안 띄게)
+                is_out_of_focus = use_focus and (d not in focus_dates)
+                
                 # --- 시각화 로직 ---
-                if highlight_only_changes and is_calm:
-                    # 평온한 셀: 흐릿한 회색으로 (수정 필요 없음을 의미)
+                if is_out_of_focus or (highlight_only_changes and is_calm):
+                    # 회색 처리 (포커스 밖 OR 평온한 셀)
+                    tooltip = "title='수정 대상 외'" if is_out_of_focus else "title='수정 필요 없음'"
                     style = "background-color: #FAFAFA; color: #BBB; font-weight: normal; border: 1px solid #EEE; padding:4px; text-align:center;"
                     content = f"<span style='font-size:10px;'>{final_p:,}</span><br><span style='font-size:8px; color:#CCC;'>✓{final_bar}</span>"
-                    html += f"<td style='{style}' title='수정 필요 없음'>{content}</td>"
+                    html += f"<td style='{style}' {tooltip}>{content}</td>"
                     continue
                 
                 # 비-평온 셀: 기존 로직대로 강조
@@ -1630,16 +1639,27 @@ if not st.session_state.today_df.empty:
 
     st.divider()
 
-    # 채널 판매가 (이지에디터) - 변동 강조 토글 공유
+    # 채널 판매가 (이지에디터) - 변동 강조 토글 + 5번 선택 날짜 포커스
     if st.session_state.channel_list:
         # 4번 표 토글 상태를 그대로 사용 (동일한 의도)
         hlc = st.session_state.get("highlight_only_changes", True)
         
+        # ★ 5번 누적 선택 상태 → 포커스
+        picked = st.session_state.get('_picked_dates', set())
+        focus_dates = picked if picked else None  # 비었으면 None=전체활성
+        
+        focus_info = ""
+        if focus_dates:
+            focus_info = f"🎯 <b>포커스 모드</b>: 5번에서 선택한 <b>{len(focus_dates)}일</b>만 색칠 / 나머지는 회색"
+        else:
+            focus_info = "🌐 <b>전체 모드</b>: 5번 누적 선택이 비어있어 전체 기간 색칠 (5번에서 날짜 추가하면 그 기간만 집중)"
+        
         st.markdown(f"""
         <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
-            💡 <b>채널 판매가 표기 규칙</b> {'(🎯 변동만 강조 모드 ON)' if hlc else '(📋 전체 보기 모드)'}<br>
-            - <b>회색 + 작은 글씨</b>: 수정 필요 없는 평온한 셀 (변동만 강조 ON일 때)<br>
-            - 배경색(그라데이션) ▲: 어제 최종가 대비 오늘 최종가가 변동된 셀<br>
+            💡 <b>채널 판매가 표기 규칙</b> {'(🎯 변동만 강조 ON)' if hlc else '(📋 전체 보기)'}<br>
+            <span style='color:#1976D2;'>{focus_info}</span><br>
+            - <b>회색 + 작은 글씨</b>: 수정 필요 없는 평온한 셀 또는 포커스 외 날짜<br>
+            - 배경색(그라데이션) ▲: 시스템 권장값이 변동된 셀 (3번 판도변화 표와 동일)<br>
             - 붉은 점선 + ⭐: 수동으로 전략적 오버라이드한 날짜 (권장과 다름)<br>
             - 주황 테두리 + ⚠️: 오버라이드 후 시스템 권장이 바뀐 '재검토 필요' 날짜
         </div>
@@ -1648,7 +1668,8 @@ if not st.session_state.today_df.empty:
         for ch in st.session_state.channel_list:
             st.markdown(render_channel_sale_table(
                 curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data,
-                highlight_only_changes=hlc
+                highlight_only_changes=hlc,
+                focus_dates=focus_dates
             ), unsafe_allow_html=True)
 
     st.divider()
