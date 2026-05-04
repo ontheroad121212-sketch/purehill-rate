@@ -1260,6 +1260,166 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"삭제 실패: {e}")
 
+    # ---------- 일괄 삭제 (기간/전체) ----------
+    with st.expander("💥 일괄 삭제 (기간/전체) - 매우 위험", expanded=False):
+        st.error("🚨 이 기능은 여러 날짜의 데이터를 한꺼번에 삭제합니다. 매우 신중히 사용하세요.")
+        
+        bulk_mode = st.radio(
+            "삭제 방식",
+            ["📆 기간 (시작일 ~ 종료일)", "🌍 전체 데이터 (모든 날짜)"],
+            key="bulk_del_mode"
+        )
+        
+        bulk_target_type = st.radio(
+            "삭제 대상",
+            ["⭐ 적용 요금만 (오버라이드)", "📂 일일 스냅샷만 (리포트)", "💥 둘 다 (전부)"],
+            key="bulk_del_type",
+            help="대부분의 경우 '적용 요금만' 선택하면 오버라이드를 깨끗이 초기화 가능"
+        )
+        
+        # 기간 모드일 때만 날짜 입력
+        if bulk_mode == "📆 기간 (시작일 ~ 종료일)":
+            bcol1, bcol2 = st.columns(2)
+            with bcol1:
+                bulk_start = st.date_input("시작일", value=date.today(), key="bulk_del_start")
+            with bcol2:
+                bulk_end = st.date_input("종료일", value=date.today() + timedelta(days=60), key="bulk_del_end")
+        
+        # 미리보기: 몇 건이 삭제될지 카운트
+        if st.button("🔍 삭제 대상 미리 보기", use_container_width=True, key="bulk_preview_btn"):
+            try:
+                count_snap = 0
+                count_applied = 0
+                
+                if bulk_mode == "🌍 전체 데이터 (모든 날짜)":
+                    # 전체 카운트
+                    if "스냅샷" in bulk_target_type or "둘 다" in bulk_target_type:
+                        count_snap = sum(1 for _ in db.collection("daily_snapshots").stream())
+                    if "적용 요금" in bulk_target_type or "둘 다" in bulk_target_type:
+                        count_applied = sum(1 for _ in db.collection("applied_rates").stream())
+                else:
+                    # 기간 카운트
+                    s_str = bulk_start.strftime("%Y-%m-%d")
+                    e_str = bulk_end.strftime("%Y-%m-%d")
+                    
+                    if "스냅샷" in bulk_target_type or "둘 다" in bulk_target_type:
+                        snap_docs = db.collection("daily_snapshots")\
+                            .where("work_date", ">=", s_str)\
+                            .where("work_date", "<=", e_str).stream()
+                        count_snap = sum(1 for _ in snap_docs)
+                    if "적용 요금" in bulk_target_type or "둘 다" in bulk_target_type:
+                        # applied_rates는 document id가 날짜라 list_documents() 사용
+                        applied_docs = db.collection("applied_rates").stream()
+                        for doc in applied_docs:
+                            if s_str <= doc.id <= e_str:
+                                count_applied += 1
+                
+                st.session_state['_bulk_preview'] = {
+                    'snap': count_snap,
+                    'applied': count_applied,
+                    'mode': bulk_mode,
+                    'target_type': bulk_target_type,
+                    'range': (bulk_start, bulk_end) if bulk_mode == "📆 기간 (시작일 ~ 종료일)" else None
+                }
+                st.rerun()
+            except Exception as e:
+                st.error(f"미리보기 실패: {e}")
+        
+        # 미리보기 결과 표시
+        preview = st.session_state.get('_bulk_preview')
+        if preview:
+            range_info = ""
+            if preview.get('range'):
+                s, e = preview['range']
+                range_info = f"({s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')})"
+            else:
+                range_info = "(전체 데이터)"
+            
+            st.markdown(f"""
+            <div style='background:#FFEBEE; padding:10px; border-radius:6px; 
+                        border:2px solid #D32F2F; margin:8px 0;'>
+                <b style='color:#B71C1C;'>🎯 삭제 예정 데이터 {range_info}:</b><br>
+                • 📂 일일 스냅샷: <b>{preview['snap']}건</b><br>
+                • ⭐ 적용 요금: <b>{preview['applied']}건</b><br>
+                <span style='font-size:11px; color:#666;'>{preview['target_type']} / {preview['mode']}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            total = preview['snap'] + preview['applied']
+            if total > 0:
+                # 안전장치: 사용자가 "삭제 확인" 직접 타이핑
+                confirm_text = st.text_input(
+                    f"⚠️ 정말 삭제하려면 아래에 **삭제확인**이라고 입력하세요",
+                    key="bulk_del_confirm_text",
+                    placeholder="삭제확인"
+                )
+                
+                if st.button("💀 일괄 영구 삭제 실행", 
+                             type="primary",
+                             disabled=(confirm_text != "삭제확인"),
+                             use_container_width=True,
+                             key="bulk_del_execute"):
+                    try:
+                        deleted_snap = 0
+                        deleted_applied = 0
+                        
+                        if preview['mode'] == "🌍 전체 데이터 (모든 날짜)":
+                            # 전체 삭제
+                            if "스냅샷" in preview['target_type'] or "둘 다" in preview['target_type']:
+                                for doc in db.collection("daily_snapshots").stream():
+                                    doc.reference.delete()
+                                    deleted_snap += 1
+                            if "적용 요금" in preview['target_type'] or "둘 다" in preview['target_type']:
+                                for doc in db.collection("applied_rates").stream():
+                                    doc.reference.delete()
+                                    deleted_applied += 1
+                        else:
+                            # 기간 삭제
+                            s, e = preview['range']
+                            s_str = s.strftime("%Y-%m-%d")
+                            e_str = e.strftime("%Y-%m-%d")
+                            
+                            if "스냅샷" in preview['target_type'] or "둘 다" in preview['target_type']:
+                                snap_docs = db.collection("daily_snapshots")\
+                                    .where("work_date", ">=", s_str)\
+                                    .where("work_date", "<=", e_str).stream()
+                                for doc in snap_docs:
+                                    doc.reference.delete()
+                                    deleted_snap += 1
+                            
+                            if "적용 요금" in preview['target_type'] or "둘 다" in preview['target_type']:
+                                applied_docs = db.collection("applied_rates").stream()
+                                for doc in applied_docs:
+                                    if s_str <= doc.id <= e_str:
+                                        doc.reference.delete()
+                                        deleted_applied += 1
+                        
+                        st.cache_data.clear()
+                        del st.session_state['_bulk_preview']
+                        
+                        # 화면 정리
+                        st.session_state.today_df = pd.DataFrame()
+                        st.session_state.prev_df = pd.DataFrame()
+                        st.session_state.compare_label = ""
+                        st.session_state.manual_bars = {}
+                        if '_picked_dates' in st.session_state:
+                            st.session_state['_picked_dates'] = set()
+                        
+                        st.success(f"🗑️ 일괄 삭제 완료! 스냅샷 {deleted_snap}건, 적용 요금 {deleted_applied}건")
+                        st.info("화면을 초기화했습니다. 새 리포트를 업로드하세요.")
+                        st.rerun()
+                    
+                    except Exception as e:
+                        st.error(f"일괄 삭제 실패: {e}")
+            else:
+                st.success("✨ 삭제할 데이터가 없습니다.")
+        
+        # 미리보기 리셋 버튼
+        if preview:
+            if st.button("🔄 미리보기 리셋", use_container_width=True, key="bulk_preview_reset"):
+                del st.session_state['_bulk_preview']
+                st.rerun()
+
     st.divider()
     st.header("🎯 채널 & 상품 관리 (이지 에디터)")
     new_ch = st.text_input("새 채널 명칭")
