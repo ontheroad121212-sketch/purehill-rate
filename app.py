@@ -415,10 +415,17 @@ def get_bar_price(room_id, bar):
         return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
 
 # --- 4-B. 권장 vs 적용 비교 표 ---
-def render_applied_vs_recommend_table(current_df, applied_rates):
-    """날짜별 × 객실별 권장 vs 적용 비교 (가로 스크롤 매트릭스 형태로 재작성)"""
+def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, prev_applied_rates=None, highlight_only_changes=True):
+    """날짜별 × 객실별 권장 vs 적용 비교 (가로 스크롤 매트릭스 형태로 재작성)
+    
+    highlight_only_changes=True: 변동 없는 평온한 셀은 회색 처리
+    highlight_only_changes=False: 모든 적용 셀 진한 초록 (기존 방식)
+    """
     if current_df.empty:
         return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
+    
+    if prev_applied_rates is None:
+        prev_applied_rates = applied_rates  # 안전 기본값
 
     dates = sorted(current_df['Date'].unique())
     
@@ -484,11 +491,33 @@ def render_applied_vs_recommend_table(current_df, applied_rates):
             # 재검토 필요 여부
             needs_review = bool(applied_bar and rec_at_apply and rec_at_apply != rec_bar)
             
+            # ★ 어제 최종가 vs 오늘 최종가 비교 (판도 변화 판단)
+            final_bar_today = applied_bar if applied_bar else rec_bar
+            prev_final_bar = None
+            prev_applied_bar = prev_applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+            if prev_applied_bar:
+                prev_final_bar = prev_applied_bar
+            elif prev_df is not None and not prev_df.empty:
+                prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
+                if not prev_m.empty:
+                    _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
+                    prev_final_bar = prev_rec_bar
+            
+            is_trend_changed = (prev_final_bar is not None and 
+                                str(prev_final_bar).strip() != str(final_bar_today).strip())
+            
+            # ★ '평온한 셀' 판단: 적용=권장 + 재검토 불필요 + 어제와 동일
+            is_calm = (applied_bar and 
+                       applied_bar == rec_bar and 
+                       not needs_review and 
+                       not is_trend_changed)
+            
             # 메모를 툴팁으로 처리
             tip_parts = []
             if memo: tip_parts.append(f"📝 {memo}")
             if applied_at: tip_parts.append(f"⏰ {applied_at}")
             if needs_review: tip_parts.append(f"⚠️ 적용시점 권장: {rec_at_apply} → 현재 권장: {rec_bar}")
+            if is_trend_changed: tip_parts.append(f"▲ 어제 최종가: {prev_final_bar} → 오늘: {final_bar_today}")
             memo_text = " | ".join(tip_parts)
             tooltip = f"title='{memo_text}'" if memo_text else ""
             
@@ -496,13 +525,25 @@ def render_applied_vs_recommend_table(current_df, applied_rates):
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FAFAFA; color: #999;"
                 content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
             elif needs_review:
-                # 재검토 필요 - 주황 강조
+                # 재검토 필요 - 주황 강조 (토글 무관, 항상 강조)
                 style = "border:2px solid #FF6F00; padding:8px; text-align:center; background-color: #FFF3E0; color: #E65100; font-weight:bold;"
                 content = f"⚠️ <b>{applied_bar}</b><br><span style='font-size:9px; color:#FF6F00;'>권장→{rec_bar}</span>"
             elif applied_bar == rec_bar:
-                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
-                content = f"✅ <b>{applied_bar}</b>"
+                # 적용 = 권장
+                if highlight_only_changes and is_calm:
+                    # 평온한 셀: 흐리게 처리
+                    style = "border:1px solid #eee; padding:8px; text-align:center; background-color: #FAFAFA; color: #BBB;"
+                    content = f"<span style='font-size:10px;'>✓ {applied_bar}</span>"
+                elif is_trend_changed:
+                    # 어제와 다름: 진한 초록 + ▲
+                    style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
+                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>어제 {prev_final_bar}</span>"
+                else:
+                    # 토글 OFF 일 때 평온한 셀 (기존 방식)
+                    style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
+                    content = f"✅ <b>{applied_bar}</b>"
             else:
+                # 적용 ≠ 권장 (전략 적용)
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FFF3E0; color: #C62828; border: 1.5px dashed #FF8F00;"
                 content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
                 
@@ -886,8 +927,11 @@ def render_apply_rate_ui(current_df, applied_rates):
                 st.rerun()
                 
 # --- 4-D. 채널 판매가 (적용가 기준 + 판도변화 버그 수정) ---
-def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None):
-    """채널별 판매가 - 어제 최종가 vs 오늘 최종가 비교로 판도 변화 정확하게 계산"""
+def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None, highlight_only_changes=True):
+    """채널별 판매가 - 어제 최종가 vs 오늘 최종가 비교로 판도 변화 정확하게 계산
+    
+    highlight_only_changes=True: 변동 없는 평온한 셀은 흐리게 처리 (눈에 잘 안 띄게)
+    """
     if current_df.empty:
         return ""
     
@@ -981,7 +1025,21 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                 after_disc = b_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
                 
+                # ★ '평온한 셀' 판단: 적용/권장 동일 + 어제와 같음 + 재검토 불필요
+                is_strategic_override = is_applied and (applied_bar != rec_bar)  # 권장과 다른 전략적 적용
+                is_calm = (not is_trend_changed and 
+                           not needs_review and 
+                           not is_strategic_override)
+                
                 # --- 시각화 로직 ---
+                if highlight_only_changes and is_calm:
+                    # 평온한 셀: 흐릿한 회색으로 (수정 필요 없음을 의미)
+                    style = "background-color: #FAFAFA; color: #BBB; font-weight: normal; border: 1px solid #EEE; padding:4px; text-align:center;"
+                    content = f"<span style='font-size:10px;'>{final_p:,}</span><br><span style='font-size:8px; color:#CCC;'>✓{final_bar}</span>"
+                    html += f"<td style='{style}' title='수정 필요 없음'>{content}</td>"
+                    continue
+                
+                # 비-평온 셀: 기존 로직대로 강조
                 # A. 판도 변화 시 색상 적용
                 if is_trend_changed:
                     bg = BAR_GRADIENT_COLORS.get(final_bar, "#7000FF")
@@ -1270,8 +1328,28 @@ if not st.session_state.today_df.empty:
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
         st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-        # 4. 권장 vs 적용 비교
-        st.markdown(render_applied_vs_recommend_table(curr_filtered, applied_rates_data), unsafe_allow_html=True)
+        # 4. 권장 vs 적용 비교 (변동 강조 토글)
+        st.markdown("---")
+        tcol1, tcol2 = st.columns([1, 3])
+        with tcol1:
+            highlight_changes = st.checkbox(
+                "🎯 변동된 셀만 강조 (4번 + 이지에디터)",
+                value=True,
+                key="highlight_only_changes",
+                help="ON: 권장과 같고 어제와도 동일한 '평온한' 셀은 회색으로 처리 / OFF: 모든 적용 셀 진하게 표시"
+            )
+        with tcol2:
+            if highlight_changes:
+                st.caption("✅ 진짜 손댈 셀만 도드라집니다 (▲ 어제와 다름 / ⭐ 전략 적용 / ⚠️ 재검토 필요)")
+            else:
+                st.caption("📋 모든 적용 셀이 진한 색으로 표시됩니다 (전체 보기 모드)")
+        
+        st.markdown(render_applied_vs_recommend_table(
+            curr_filtered, applied_rates_data, 
+            prev_df=prev_filtered, 
+            prev_applied_rates=applied_rates_data,
+            highlight_only_changes=highlight_changes
+        ), unsafe_allow_html=True)
 
         # 5. 요금 적용 UI
         render_apply_rate_ui(curr, applied_rates_data)
@@ -1309,20 +1387,25 @@ if not st.session_state.today_df.empty:
 
     st.divider()
 
-    # 채널 판매가 (이지에디터) - 판도변화 버그 수정 적용
+    # 채널 판매가 (이지에디터) - 변동 강조 토글 공유
     if st.session_state.channel_list:
-        st.markdown("""
+        # 4번 표 토글 상태를 그대로 사용 (동일한 의도)
+        hlc = st.session_state.get("highlight_only_changes", True)
+        
+        st.markdown(f"""
         <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
-            💡 <b>채널 판매가 표기 규칙</b><br>
-            - 배경색(그라데이션): 어제 최종가 대비 오늘 최종가가 변동되었을 때 (오버라이드 포함)<br>
-            - 붉은 점선과 ⭐: 수동으로 전략적 오버라이드한 날짜<br>
-            - 주황 테두리와 ⚠️: 오버라이드 후 시스템 권장이 바뀐 '재검토 필요' 날짜
+            💡 <b>채널 판매가 표기 규칙</b> {'(🎯 변동만 강조 모드 ON)' if hlc else '(📋 전체 보기 모드)'}<br>
+            - <b>회색 + 작은 글씨</b>: 수정 필요 없는 평온한 셀 (변동만 강조 ON일 때)<br>
+            - 배경색(그라데이션) ▲: 어제 최종가 대비 오늘 최종가가 변동된 셀<br>
+            - 붉은 점선 + ⭐: 수동으로 전략적 오버라이드한 날짜 (권장과 다름)<br>
+            - 주황 테두리 + ⚠️: 오버라이드 후 시스템 권장이 바뀐 '재검토 필요' 날짜
         </div>
         """, unsafe_allow_html=True)
         
         for ch in st.session_state.channel_list:
             st.markdown(render_channel_sale_table(
-                curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data
+                curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data,
+                highlight_only_changes=hlc
             ), unsafe_allow_html=True)
 
     st.divider()
