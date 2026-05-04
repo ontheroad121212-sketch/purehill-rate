@@ -1166,6 +1166,100 @@ with st.sidebar:
         if found: st.success("역사적 스냅샷 로드 완료")
         else: st.warning("해당 날짜의 데이터가 없습니다.")
 
+    # ---------- 특정일 데이터 삭제 (NEW) ----------
+    with st.expander("🗑️ 특정일 데이터 삭제 (위험)", expanded=False):
+        st.warning("⚠️ 이 작업은 되돌릴 수 없습니다. 신중히 사용하세요.")
+        
+        del_day = st.date_input("삭제할 날짜", value=date.today(), key="del_target_date")
+        del_day_str = del_day.strftime("%Y-%m-%d")
+        
+        # 해당 날짜에 무엇이 저장되어 있는지 미리 보여주기
+        try:
+            snap_count = sum(1 for _ in db.collection("daily_snapshots")
+                             .where("work_date", "==", del_day_str).stream())
+        except Exception:
+            snap_count = 0
+        
+        applied_doc = db.collection("applied_rates").document(del_day_str).get()
+        has_applied = applied_doc.exists
+        
+        st.markdown(f"""
+        <div style='background:#FAFAFA; padding:8px 12px; border-radius:6px; 
+                    border:1px solid #E0E0E0; font-size:12px; margin:8px 0;'>
+            <b>📋 {del_day_str}에 저장된 데이터:</b><br>
+            • 일일 스냅샷 (리포트): <b style='color:#1976D2;'>{snap_count}건</b><br>
+            • 적용 요금 (오버라이드): <b style='color:#D32F2F;'>{'있음' if has_applied else '없음'}</b>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 삭제 대상 선택
+        target_options = []
+        if snap_count > 0:
+            target_options.append(f"📂 일일 스냅샷 ({snap_count}건)")
+        if has_applied:
+            target_options.append("⭐ 적용 요금 오버라이드")
+        if snap_count > 0 and has_applied:
+            target_options.append("💥 둘 다 (전부 삭제)")
+        
+        if not target_options:
+            st.info(f"✨ {del_day_str}에 저장된 데이터가 없습니다.")
+        else:
+            del_target = st.radio("삭제 대상", target_options, key="del_target_radio")
+            
+            # 안전장치: 확인 체크박스
+            confirm = st.checkbox(
+                f"☑️ 정말로 **{del_day_str}**의 데이터를 삭제하겠습니다",
+                key="del_confirm_check"
+            )
+            
+            if st.button("🗑️ 영구 삭제 실행", 
+                         type="primary", 
+                         disabled=not confirm, 
+                         use_container_width=True,
+                         key="del_execute_btn"):
+                deleted_snap = 0
+                deleted_applied = False
+                
+                try:
+                    # 일일 스냅샷 삭제
+                    if "스냅샷" in del_target or "둘 다" in del_target:
+                        snap_docs = db.collection("daily_snapshots")\
+                            .where("work_date", "==", del_day_str).stream()
+                        for doc in snap_docs:
+                            doc.reference.delete()
+                            deleted_snap += 1
+                    
+                    # 적용 요금 삭제
+                    if "적용 요금" in del_target or "둘 다" in del_target:
+                        if has_applied:
+                            db.collection("applied_rates").document(del_day_str).delete()
+                            deleted_applied = True
+                    
+                    st.cache_data.clear()
+                    
+                    msg_parts = []
+                    if deleted_snap > 0:
+                        msg_parts.append(f"📂 스냅샷 {deleted_snap}건")
+                    if deleted_applied:
+                        msg_parts.append("⭐ 적용 요금")
+                    
+                    if msg_parts:
+                        st.success(f"🗑️ 삭제 완료: {', '.join(msg_parts)}")
+                        
+                        # 만약 오늘 보고 있는 데이터가 삭제 대상이면 화면 정리
+                        if del_day == date.today():
+                            st.session_state.today_df = pd.DataFrame()
+                            st.session_state.prev_df = pd.DataFrame()
+                            st.session_state.compare_label = ""
+                            st.info("화면을 초기화합니다. 새 리포트를 업로드하세요.")
+                        
+                        st.rerun()
+                    else:
+                        st.warning("삭제할 데이터를 찾지 못했습니다.")
+                
+                except Exception as e:
+                    st.error(f"삭제 실패: {e}")
+
     st.divider()
     st.header("🎯 채널 & 상품 관리 (이지 에디터)")
     new_ch = st.text_input("새 채널 명칭")
