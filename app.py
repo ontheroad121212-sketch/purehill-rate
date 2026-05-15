@@ -5,9 +5,11 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import math
 import re
-import io  # 엑셀 다운로드를 위해 추가됨
+import io
+import hashlib
+import json
 
-# --- 1. 파이버베이스 초기화 ---
+# --- 1. 파이어베이스 초기화 ---
 if not firebase_admin._apps:
     try:
         fb_dict = st.secrets["firebase"]
@@ -19,12 +21,12 @@ db = firestore.client()
 
 # --- 2. 전역 설정 데이터 ---
 BAR_GRADIENT_COLORS = {
-    "BAR0": "#B71C1C", # 수동 인상 (가장 눈에 띄는 진한 빨강)
+    "BAR0": "#B71C1C",
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
 }
 BAR_LIGHT_COLORS = {
-    "BAR0": "#FFCDD2", 
+    "BAR0": "#FFCDD2",
     "BAR1": "#FFEBEE", "BAR2": "#FFEBEE", "BAR3": "#FFF3E0", "BAR4": "#FFF3E0",
     "BAR5": "#E8F5E9", "BAR6": "#E8F5E9", "BAR7": "#F1F8E9", "BAR8": "#F1F8E9",
 }
@@ -47,13 +49,21 @@ FIXED_PRICE_TABLE = {
     "FPT": {"UND1": 500000, "UND2": 550000, "MID1": 600000, "MID2": 650000, "UPP1": 700000, "UPP2": 750000},
     "PPV": {"UND1": 1104000, "UND2": 1154000, "MID1": 1154000, "MID2": 1304000, "UPP1": 1304000, "UPP2": 1554000},
 }
-# FIXED 객실용 수동 BAR0 가격 테이블 추가
 FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, "PPV": 1704000}
 
-# --- 2-A. 오늘 날짜 기준 ---
 TODAY = date.today()
 
-# --- 3. 로직 함수 ---
+# Firebase 컬렉션 이름 (스네이크케이스)
+COL_SNAPSHOTS = "daily_snapshots"
+COL_APPLIED = "applied_rates"
+COL_SETTINGS = "settings"
+COL_AUDIT = "audit_log"
+COL_RESTORE = "restore_points"
+
+
+# =============================================================================
+# 3. 로직 함수
+# =============================================================================
 def get_season_details(date_obj):
     m, d = date_obj.month, date_obj.day
     md = f"{m:02d}.{d:02d}"
@@ -72,6 +82,7 @@ def get_season_details(date_obj):
         season, is_weekend = "MID", actual_is_weekend
     type_code = f"{season}{'2' if is_weekend else '1'}"
     return type_code, season, is_weekend
+
 
 def determine_bar(season, is_weekend, occ):
     if season == "UPP":
@@ -96,7 +107,7 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 51: return "BAR5"
             elif occ >= 31: return "BAR6"
             else: return "BAR7"
-    else: # UND
+    else:  # UND
         if is_weekend:
             if occ >= 81: return "BAR4"
             elif occ >= 51: return "BAR5"
@@ -108,22 +119,28 @@ def determine_bar(season, is_weekend, occ):
             elif occ >= 31: return "BAR7"
             else: return "BAR8"
 
+
 def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
     type_code, season, is_weekend = get_season_details(date_obj)
-    try: current_avail = float(avail) if pd.notna(avail) else 0.0
-    except: current_avail = 0.0
+    try:
+        current_avail = float(avail) if pd.notna(avail) else 0.0
+    except:
+        current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
-    
-    # [핵심] 수동 오버라이드 로직 처리
+
     if manual_bar:
         bar = manual_bar
         if bar == "BAR0":
-            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
-            else: price = FIXED_BAR0_TABLE.get(room_id, 0)
+            if room_id in DYNAMIC_ROOMS:
+                price = PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
+            else:
+                price = FIXED_BAR0_TABLE.get(room_id, 0)
         else:
-            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-            else: price = FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
-        return occ, bar, price, True # is_manual = True
+            if room_id in DYNAMIC_ROOMS:
+                price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
+            else:
+                price = FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+        return occ, bar, price, True
 
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
@@ -131,67 +148,163 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
     else:
         bar = type_code
         price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
-    return occ, bar, price, False # is_manual = False
+    return occ, bar, price, False
+
 
 def date_filter_toggle(key_prefix, total_dates, default_show_past=False):
-    """과거 날짜 표시 토글. True면 전체, False면 오늘 이후만"""
     past_count = sum(1 for d in total_dates if d < TODAY)
     future_count = len(total_dates) - past_count
-    
+
     if past_count == 0:
-        return total_dates  # 과거 없으면 그대로
-    
+        return total_dates
+
     show_past = st.checkbox(
         f"📜 과거 {past_count}일 포함 (현재 미래 {future_count}일만 표시)",
         value=default_show_past,
         key=f"show_past_{key_prefix}"
     )
-    
-    if show_past:
-        return total_dates
-    else:
-        return [d for d in total_dates if d >= TODAY]
+    return total_dates if show_past else [d for d in total_dates if d >= TODAY]
+
 
 def filter_df_by_dates(df, visible_dates):
-    """DataFrame을 보이는 날짜만 필터링"""
     if df.empty:
         return df
     return df[df['Date'].isin(visible_dates)].copy()
 
-# --- 3-A. 재검토 필요 판단 헬퍼 (NEW) ---
-def is_review_needed(rid, date_obj, current_df, applied_rates):
-    """
-    오버라이드 적용된 날짜에서 시스템 권장이 변경되어 재검토가 필요한지 판단.
-    리턴: (needs_review: bool, applied_bar: str, recommended_bar: str)
-    """
-    date_str = date_obj.strftime('%Y-%m-%d')
-    applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-    
-    if not applied_bar:
-        return False, None, None
-    
-    curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == date_obj)]
-    if curr_match.empty:
-        return False, applied_bar, None
-    
-    avail = curr_match.iloc[0]['Available']
-    total = curr_match.iloc[0]['Total']
-    _, rec_bar, _, _ = get_final_values(rid, date_obj, avail, total)
-    
-    # 적용 시점의 권장 BAR 저장 여부 확인
-    saved_rec_at_apply = applied_rates.get(date_str, {}).get('rec_bar_at_apply', {}).get(rid)
-    
-    if saved_rec_at_apply and saved_rec_at_apply != rec_bar:
-        # 적용 당시 권장이랑 지금 권장이 다르면 재검토 필요
-        return True, applied_bar, rec_bar
-    
-    return False, applied_bar, rec_bar
 
-# --- 4. 렌더러 ---
+# =============================================================================
+# 3-A. 재검토 캐싱 (B 개선: build_review_map)
+# =============================================================================
+def _df_signature(df, applied_rates):
+    """DataFrame + applied_rates의 시그니처 - 캐시 키용"""
+    if df.empty:
+        d_sig = "empty"
+    else:
+        # 핵심 컬럼만 사용해서 해시
+        try:
+            d_sig = hashlib.md5(
+                pd.util.hash_pandas_object(df[['Date', 'RoomID', 'Available', 'Total']]).values.tobytes()
+            ).hexdigest()
+        except Exception:
+            d_sig = str(len(df)) + "_" + str(df['Date'].min()) + "_" + str(df['Date'].max())
+    try:
+        a_sig = hashlib.md5(json.dumps(applied_rates, sort_keys=True, default=str).encode()).hexdigest()
+    except Exception:
+        a_sig = str(len(applied_rates))
+    return f"{d_sig}_{a_sig}"
+
+
+def build_review_map(current_df, applied_rates):
+    """모든 (rid, date) 조합에 대해 재검토 필요 여부를 한 번에 계산.
+    리턴: dict {(rid, date_obj): {'needs': bool, 'applied': str, 'rec': str, 'rec_at_apply': str}}
+    세션 캐시 사용 (시그니처 기반)"""
+    if current_df.empty:
+        return {}
+
+    sig = _df_signature(current_df, applied_rates)
+    cache_key = f"_review_map_cache_{sig}"
+
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+
+    result = {}
+    for rid in DYNAMIC_ROOMS:
+        room_df = current_df[current_df['RoomID'] == rid]
+        for _, row in room_df.iterrows():
+            d = row['Date']
+            date_str = d.strftime('%Y-%m-%d')
+            applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+
+            if not applied_bar:
+                continue
+
+            _, rec_bar, _, _ = get_final_values(rid, d, row['Available'], row['Total'])
+            rec_at_apply = applied_rates.get(date_str, {}).get('rec_bar_at_apply', {}).get(rid)
+            needs = bool(rec_at_apply and rec_at_apply != rec_bar)
+
+            result[(rid, d)] = {
+                'needs': needs,
+                'applied': applied_bar,
+                'rec': rec_bar,
+                'rec_at_apply': rec_at_apply,
+            }
+
+    # 이전 캐시 정리 (메모리 절약)
+    for k in list(st.session_state.keys()):
+        if k.startswith("_review_map_cache_") and k != cache_key:
+            del st.session_state[k]
+    st.session_state[cache_key] = result
+    return result
+
+
+def is_review_needed(rid, date_obj, current_df, applied_rates):
+    """캐시된 리뷰맵 사용 - 기존 호출부 호환용"""
+    review_map = build_review_map(current_df, applied_rates)
+    info = review_map.get((rid, date_obj))
+    if not info:
+        # 캐시에 없으면 적용 BAR이 없다는 뜻 - 기존 동작 유지
+        date_str = date_obj.strftime('%Y-%m-%d')
+        applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+        if not applied_bar:
+            return False, None, None
+        # 안전장치
+        curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == date_obj)]
+        if curr_match.empty:
+            return False, applied_bar, None
+        _, rec_bar, _, _ = get_final_values(rid, date_obj, curr_match.iloc[0]['Available'], curr_match.iloc[0]['Total'])
+        return False, applied_bar, rec_bar
+    return info['needs'], info['applied'], info['rec']
+
+
+# =============================================================================
+# 3-B. 가격 무결성 검증 (F 개선)
+# =============================================================================
+def validate_price_tables():
+    """PRICE_TABLE의 BAR1~BAR8 가격이 단조 감소(BAR1>BAR2>...>BAR8)인지 검증.
+    리턴: list of warnings"""
+    warnings = []
+    for room, bars in PRICE_TABLE.items():
+        prev_price = None
+        prev_bar = None
+        for i in range(1, 9):
+            bar = f"BAR{i}"
+            p = bars.get(bar)
+            if p is None:
+                warnings.append(f"⚠️ {room}: {bar} 가격 누락")
+                continue
+            if prev_price is not None and p >= prev_price:
+                warnings.append(f"🚨 {room}: {prev_bar}({prev_price:,}) ≤ {bar}({p:,}) — 가격 역전!")
+            prev_price = p
+            prev_bar = bar
+        bar0 = bars.get("BAR0")
+        bar1 = bars.get("BAR1")
+        if bar0 is not None and bar1 is not None and bar0 <= bar1:
+            warnings.append(f"🚨 {room}: BAR0({bar0:,}) ≤ BAR1({bar1:,}) — 수동인상가가 BAR1보다 작거나 같음!")
+
+    # FIXED_PRICE_TABLE: UND1 ≤ UND2 ≤ MID1 ≤ MID2 ≤ UPP1 ≤ UPP2 순서 확인
+    order = ["UND1", "UND2", "MID1", "MID2", "UPP1", "UPP2"]
+    for room, prices in FIXED_PRICE_TABLE.items():
+        prev_p = None
+        prev_t = None
+        for t in order:
+            p = prices.get(t)
+            if p is None:
+                continue
+            if prev_p is not None and p < prev_p:
+                warnings.append(f"⚠️ {room}: {prev_t}({prev_p:,}) > {t}({p:,}) — 시즌 가격 역전")
+            prev_p = p
+            prev_t = t
+    return warnings
+
+
+# =============================================================================
+# 4. 렌더러 (마스터 테이블)
+# =============================================================================
 def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기준", applied_rates=None):
-    if current_df.empty: return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
+    if current_df.empty:
+        return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
     dates = sorted(current_df['Date'].unique())
-    
+
     if mode == "판매가":
         items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
         row_padding = "1px"
@@ -216,11 +329,12 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html = f"<div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; padding:10px; background:{bg_title_color}; border-left:10px solid {border_title_color};'>{title}</div>"
     html += "<div style='overflow-x: auto; white-space: nowrap; border: 1px solid #ddd;'>"
     html += f"<table style='width:100%; border-collapse:collapse; font-size:{font_size}; min-width:1000px;'><thead><tr style='background:#f9f9f9;'><th rowspan='2' style='border:1px solid #ddd; width:180px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:{header_padding};'>객실/프로모션</th>"
-    for d in dates: html += f"<th style='border:1px solid #ddd; padding:{header_padding}; {col_width_style}'>{d.strftime('%m-%d')}</th>"
+    for d in dates:
+        html += f"<th style='border:1px solid #ddd; padding:{header_padding}; {col_width_style}'>{d.strftime('%m-%d')}</th>"
     html += "</tr><tr style='background:#f9f9f9;'>"
     for d in dates:
         wd = WEEKDAYS_KR[d.weekday()]
-        color = "red" if wd=='일' else ("blue" if wd=='토' else "black")
+        color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
         html += f"<th style='border:1px solid #ddd; padding:{header_padding}; color:{color}; {col_width_style}'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
@@ -240,10 +354,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
         border_thick = "border-bottom:3.4px solid #000;" if rid in ["HDF", "PPV"] else ""
         html += f"<tr style='{border_thick}'><td style='border:1px solid #ddd; padding:{row_padding}; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1; {line_style}'>{label}</td>"
-        
+
         for d in dates:
             date_str = d.strftime('%Y-%m-%d')
-            
+
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
                 html += f"<td style='border:1px solid #ddd; padding:{row_padding}; text-align:center;'>-</td>"
@@ -251,11 +365,11 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
 
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            
+
             override_key = f"{date_str}_{rid}"
             m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
             occ, bar, base_price, is_manual = get_final_values(rid, d, avail, total, m_bar)
-            
+
             prev_bar, prev_avail = None, None
             if not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
@@ -265,26 +379,23 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], p_m_bar)
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
-            
+
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
                 style += f"background-color: {bg};"
                 content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
-                
+
             elif mode == "최종결과":
                 applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
                 is_applied = applied_bar is not None
-                
                 final_bar = applied_bar if is_applied else bar
                 final_price = get_bar_price(rid, final_bar) if is_applied else base_price
-                
                 bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
-                
-                # 재검토 필요 표시
+
                 needs_review = False
                 if is_applied and applied_rates and rid in DYNAMIC_ROOMS:
                     needs_review, _, _ = is_review_needed(rid, d, current_df, applied_rates)
-                
+
                 if is_applied:
                     if needs_review:
                         style += f"background-color: {bg}; border: 3px solid #FF6F00; font-weight: bold; box-shadow: inset 0 0 0 2px #FFD54F;"
@@ -295,7 +406,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 else:
                     style += f"background-color: {bg}; opacity: 0.9;"
                     content = f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
-            
+
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
@@ -308,39 +419,35 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 elif pickup < 0:
                     style += "color:blue; font-weight:bold;"
                     content = f"{pickup:.0f}"
-                else: content = "-"
-            
+                else:
+                    content = "-"
+
             elif mode == "판도변화":
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
-                
                 if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
                     content = f"▲ {bar}"
-                else: 
+                else:
                     content = bar
-                    
+
             elif mode == "판매가":
                 try:
                     b_price = float(base_price) if base_price is not None else 0
                     d_rate = float(discount) if discount is not None else 0
                     a_price = float(add_price) if add_price is not None else 0
-                    
                     after_disc = b_price * (1 - (d_rate / 100))
                     final_p = int((math.floor(after_disc / 1000) * 1000) + a_price)
                     content = f"<b>{final_p:,}</b>"
-                    
                 except (ValueError, TypeError, ZeroDivisionError):
                     content = "<b>-</b>"
 
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
-                
                 if prev_bar is not None and prev_b_str != curr_b_str:
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
-                
                 if is_manual:
                     style += "border: 2px dashed #FF0000;"
                     content = f"⭐ {content}"
@@ -350,27 +457,24 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
     html += "</tbody></table></div>"
     return html
 
-# --- 4-A. 적용 요금 관리 (applied_rates) ---
+
+# =============================================================================
+# 4-A. 적용 요금 관리 (applied_rates)
+# =============================================================================
 @st.cache_data(ttl=60)
 def load_applied_rates():
-    """Firebase에서 적용 이력 로드. 키는 'YYYY-MM-DD' 형식"""
     try:
-        docs = db.collection("applied_rates").stream()
+        docs = db.collection(COL_APPLIED).stream()
         result = {}
         for doc in docs:
-            d = doc.to_dict()
-            result[doc.id] = d
+            result[doc.id] = doc.to_dict()
         return result
     except Exception:
         return {}
 
-def save_applied_rate(target_date_str, applied_data, memo="", rec_at_apply=None):
-    """
-    특정 날짜에 적용된 요금 저장
-    target_date_str: '2026-04-25' 형식
-    applied_data: {'FDB': 'BAR5', 'FDE': 'BAR5', ...}
-    rec_at_apply: 적용 시점의 시스템 권장 BAR (재검토 알림용)
-    """
+
+def save_applied_rate(target_date_str, applied_data, memo="", rec_at_apply=None, prev_rooms=None, prev_rec_at_apply=None):
+    """적용 저장 + 변경 이력(audit log) 자동 기록"""
     try:
         payload = {
             'applied_date': target_date_str,
@@ -381,53 +485,296 @@ def save_applied_rate(target_date_str, applied_data, memo="", rec_at_apply=None)
         }
         if rec_at_apply:
             payload['rec_bar_at_apply'] = rec_at_apply
-        db.collection("applied_rates").document(target_date_str).set(payload)
+        db.collection(COL_APPLIED).document(target_date_str).set(payload)
+
+        # 변경 이력 기록 (C 개선)
+        log_audit(
+            action="apply_save",
+            target_date=target_date_str,
+            new_rooms=applied_data,
+            old_rooms=prev_rooms or {},
+            memo=memo,
+            new_rec_at_apply=rec_at_apply,
+            old_rec_at_apply=prev_rec_at_apply,
+        )
+
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"적용 저장 실패: {e}")
         return False
 
-def delete_applied_rate(target_date_str):
+
+def delete_applied_rate(target_date_str, prev_rooms=None, prev_memo="", prev_rec_at_apply=None):
     try:
-        db.collection("applied_rates").document(target_date_str).delete()
+        db.collection(COL_APPLIED).document(target_date_str).delete()
+        log_audit(
+            action="apply_delete",
+            target_date=target_date_str,
+            new_rooms={},
+            old_rooms=prev_rooms or {},
+            memo=prev_memo or "",
+            old_rec_at_apply=prev_rec_at_apply,
+        )
         st.cache_data.clear()
         return True
     except:
         return False
 
+
 def get_applied_bar(target_date_str, room_id, applied_rates):
-    """해당 날짜+객실의 적용 BAR 반환. 없으면 None"""
-    day_data = applied_rates.get(target_date_str, {})
-    rooms = day_data.get('rooms', {})
-    return rooms.get(room_id)
+    return applied_rates.get(target_date_str, {}).get('rooms', {}).get(room_id)
+
 
 def get_bar_price(room_id, bar):
-    """BAR 문자열로 가격 조회"""
     if bar == "BAR0":
         if room_id in DYNAMIC_ROOMS:
             return PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
-        else:
-            return FIXED_BAR0_TABLE.get(room_id, 0)
+        return FIXED_BAR0_TABLE.get(room_id, 0)
     if room_id in DYNAMIC_ROOMS:
         return PRICE_TABLE.get(room_id, {}).get(bar, 0)
-    else:
-        return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+    return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
 
-# --- 4-B. 권장 vs 적용 비교 표 ---
-def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, prev_applied_rates=None, highlight_only_changes=True, focus_dates=None):
-    """날짜별 × 객실별 권장 vs 적용 비교 (가로 스크롤 매트릭스 형태로 재작성)
-    
-    highlight_only_changes=True: 변동 없는 평온한 셀은 회색 처리
-    focus_dates: 5번에서 선택된 날짜 set (None/빈 set → 전체 활성, 있으면 그 날짜만 강조)
-    """
+
+# =============================================================================
+# 4-A-2. 변경 이력 (Audit Log) - C 개선
+# =============================================================================
+def log_audit(action, target_date, new_rooms, old_rooms=None, memo="", new_rec_at_apply=None, old_rec_at_apply=None, extra=None):
+    """변경 이력을 audit_log 컬렉션에 기록 (무제한 보존, 수동 정리만)"""
+    try:
+        old_rooms = old_rooms or {}
+        # 변경 사항 diff 계산
+        all_keys = set(old_rooms.keys()) | set(new_rooms.keys())
+        diffs = []
+        for k in sorted(all_keys):
+            o = old_rooms.get(k)
+            n = new_rooms.get(k)
+            if o != n:
+                diffs.append({'room': k, 'from': o, 'to': n})
+
+        # 변경 없으면 기록 안 함 (스팸 방지)
+        if action in ("apply_save",) and not diffs:
+            return
+
+        ts = datetime.now()
+        payload = {
+            'action': action,  # apply_save, apply_delete, bulk_delete, restore, etc.
+            'target_date': target_date,
+            'logged_at': ts.isoformat(),
+            'logged_at_display': ts.strftime("%Y-%m-%d %H:%M:%S"),
+            'memo': memo,
+            'new_rooms': new_rooms,
+            'old_rooms': old_rooms,
+            'diffs': diffs,
+            'new_rec_at_apply': new_rec_at_apply,
+            'old_rec_at_apply': old_rec_at_apply,
+        }
+        if extra:
+            payload['extra'] = extra
+        db.collection(COL_AUDIT).add(payload)
+    except Exception as e:
+        # 로그 실패가 본 기능을 막으면 안 됨
+        pass
+
+
+@st.cache_data(ttl=30)
+def load_audit_log(limit=200, action_filter=None, date_from_str=None, date_to_str=None):
+    """변경 이력 조회"""
+    try:
+        q = db.collection(COL_AUDIT).order_by("logged_at", direction=firestore.Query.DESCENDING).limit(limit)
+        result = []
+        for doc in q.stream():
+            d = doc.to_dict()
+            d['_id'] = doc.id
+            if action_filter and d.get('action') != action_filter:
+                continue
+            if date_from_str and d.get('target_date', '') < date_from_str:
+                continue
+            if date_to_str and d.get('target_date', '') > date_to_str:
+                continue
+            result.append(d)
+        return result
+    except Exception:
+        return []
+
+
+def cleanup_audit_log(before_date_str=None):
+    """변경 이력 수동 정리 (특정 날짜 이전 또는 전체)"""
+    try:
+        deleted = 0
+        if before_date_str:
+            docs = db.collection(COL_AUDIT).where("logged_at", "<", before_date_str + "T00:00:00").stream()
+        else:
+            docs = db.collection(COL_AUDIT).stream()
+
+        batch = db.batch()
+        count = 0
+        for doc in docs:
+            batch.delete(doc.reference)
+            count += 1
+            if count >= 400:  # Firestore batch 제한
+                batch.commit()
+                deleted += count
+                batch = db.batch()
+                count = 0
+        if count > 0:
+            batch.commit()
+            deleted += count
+        st.cache_data.clear()
+        return deleted
+    except Exception as e:
+        st.error(f"정리 실패: {e}")
+        return 0
+
+
+# =============================================================================
+# 4-A-3. 복원 지점 (Restore Points) - I 개선
+# =============================================================================
+def create_restore_point(label="자동 백업", trigger="manual"):
+    """현재 applied_rates 전체를 스냅샷으로 백업"""
+    try:
+        current_applied = {}
+        for doc in db.collection(COL_APPLIED).stream():
+            current_applied[doc.id] = doc.to_dict()
+
+        ts = datetime.now()
+        payload = {
+            'label': label,
+            'trigger': trigger,  # manual, before_bulk_delete, before_shift, etc.
+            'created_at': ts.isoformat(),
+            'created_at_display': ts.strftime("%Y-%m-%d %H:%M:%S"),
+            'applied_count': len(current_applied),
+            'applied_snapshot': current_applied,
+        }
+        doc_ref = db.collection(COL_RESTORE).add(payload)
+        st.cache_data.clear()
+        return True, ts.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        st.error(f"복원 지점 생성 실패: {e}")
+        return False, None
+
+
+@st.cache_data(ttl=30)
+def load_restore_points(limit=50):
+    try:
+        q = db.collection(COL_RESTORE).order_by("created_at", direction=firestore.Query.DESCENDING).limit(limit)
+        result = []
+        for doc in q.stream():
+            d = doc.to_dict()
+            d['_id'] = doc.id
+            result.append(d)
+        return result
+    except Exception:
+        return []
+
+
+def restore_from_point(point_id):
+    """복원 지점으로 되돌리기. 현재 적용 요금을 모두 지우고 스냅샷으로 덮어씀.
+    되돌리기 직전에도 자동 백업을 생성해서 다중 안전망."""
+    try:
+        doc = db.collection(COL_RESTORE).document(point_id).get()
+        if not doc.exists:
+            return False, "복원 지점을 찾을 수 없습니다."
+        snap = doc.to_dict()
+        applied_snapshot = snap.get('applied_snapshot', {})
+
+        # 0. 되돌리기 직전 현재 상태 백업
+        create_restore_point(
+            label=f"되돌리기 전 자동백업 ({snap.get('label','')[:20]})",
+            trigger="before_restore",
+        )
+
+        # 1. 현재 applied_rates 전체 삭제 (배치)
+        batch = db.batch()
+        count = 0
+        for d in db.collection(COL_APPLIED).stream():
+            batch.delete(d.reference)
+            count += 1
+            if count >= 400:
+                batch.commit()
+                batch = db.batch()
+                count = 0
+        if count > 0:
+            batch.commit()
+
+        # 2. 스냅샷으로 덮어쓰기 (배치)
+        batch = db.batch()
+        count = 0
+        for date_id, payload in applied_snapshot.items():
+            ref = db.collection(COL_APPLIED).document(date_id)
+            batch.set(ref, payload)
+            count += 1
+            if count >= 400:
+                batch.commit()
+                batch = db.batch()
+                count = 0
+        if count > 0:
+            batch.commit()
+
+        # 3. audit log 기록
+        log_audit(
+            action="restore",
+            target_date="*",
+            new_rooms={},
+            old_rooms={},
+            memo=f"복원 지점 사용: {snap.get('label','')}",
+            extra={'restored_count': len(applied_snapshot)},
+        )
+
+        st.cache_data.clear()
+        return True, f"{len(applied_snapshot)}개 날짜 복원 완료"
+    except Exception as e:
+        return False, f"복원 실패: {e}"
+
+
+def delete_restore_point(point_id):
+    try:
+        db.collection(COL_RESTORE).document(point_id).delete()
+        st.cache_data.clear()
+        return True
+    except:
+        return False
+
+
+def cleanup_restore_points(before_date_str=None):
+    """복원 지점 수동 정리"""
+    try:
+        deleted = 0
+        if before_date_str:
+            docs = db.collection(COL_RESTORE).where("created_at", "<", before_date_str + "T00:00:00").stream()
+        else:
+            docs = db.collection(COL_RESTORE).stream()
+        batch = db.batch()
+        count = 0
+        for doc in docs:
+            batch.delete(doc.reference)
+            count += 1
+            if count >= 400:
+                batch.commit()
+                deleted += count
+                batch = db.batch()
+                count = 0
+        if count > 0:
+            batch.commit()
+            deleted += count
+        st.cache_data.clear()
+        return deleted
+    except Exception as e:
+        return 0
+
+
+# =============================================================================
+# 4-B. 권장 vs 적용 비교 표 (A 개선: 객실 필터 파라미터 추가)
+# =============================================================================
+def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, prev_applied_rates=None,
+                                      highlight_only_changes=True, focus_dates=None, room_filter=None):
+    """room_filter: 표시할 객실 리스트 (None이면 DYNAMIC_ROOMS 전체)"""
     if current_df.empty:
         return "<div style='padding:20px;'>데이터를 업로드하세요.</div>"
-    
+
     if prev_applied_rates is None:
-        prev_applied_rates = applied_rates  # 안전 기본값
-    
-    # ★ focus_dates 정규화 - pd.Timestamp / date 혼용 방지
+        prev_applied_rates = applied_rates
+
     use_focus = bool(focus_dates)
     if use_focus:
         normalized_focus = set()
@@ -439,37 +786,34 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
         focus_dates = normalized_focus
 
     dates = sorted(current_df['Date'].unique())
-    
-    # 재검토 필요 카운트 계산
-    review_count = 0
-    for rid in DYNAMIC_ROOMS:
-        for d in dates:
-            needs_review, _, _ = is_review_needed(rid, d, current_df, applied_rates)
-            if needs_review:
-                review_count += 1
-    
+    rooms_to_show = room_filter if room_filter else DYNAMIC_ROOMS
+
+    # 재검토 필요 카운트
+    review_map = build_review_map(current_df, applied_rates)
+    review_count = sum(1 for (rid, _), info in review_map.items()
+                       if info['needs'] and rid in rooms_to_show)
+
     review_banner = ""
     if review_count > 0:
         review_banner = f"""
-        <div style='background:#FFF3E0; border:2px solid #FF6F00; padding:8px 12px; 
+        <div style='background:#FFF3E0; border:2px solid #FF6F00; padding:8px 12px;
                     margin-top:5px; border-radius:6px; font-size:13px; color:#E65100;'>
-            ⚠️ <b>재검토 필요 {review_count}건</b> — 적용 시점 이후 시스템 권장이 변경된 셀이 있습니다 (주황 테두리 + ⚠️ 표시)
+            ⚠️ <b>재검토 필요 {review_count}건</b> — 적용 시점 이후 시스템 권장이 변경된 셀이 있습니다
         </div>
         """
-    
+
     html = f"""
-    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
+    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px;
                 padding:10px; background:#f0f2f6; border-left:10px solid #FF8F00;'>
         🔍 4. 권장 vs 적용 비교 대조표 (CMS 관리용)
     </div>
     {review_banner}
     """
-    
     html += "<div style='overflow-x:auto; white-space:nowrap; border:1px solid #ddd; margin-top:5px;'>"
     html += "<table style='width:100%; border-collapse:collapse; font-size:11px; min-width:1000px;'>"
     html += "<thead><tr style='background:#f9f9f9;'>"
     html += "<th rowspan='2' style='border:1px solid #ddd; width:180px; position:sticky; left:0; background:#f9f9f9; z-index:2; padding:5px;'>객실</th>"
-    for d in dates: 
+    for d in dates:
         html += f"<th style='border:1px solid #ddd; padding:5px;'>{d.strftime('%m-%d')}</th>"
     html += "</tr><tr style='background:#f9f9f9;'>"
     for d in dates:
@@ -478,18 +822,18 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
         html += f"<th style='border:1px solid #ddd; padding:5px; color:{color};'>{wd}</th>"
     html += "</tr></thead><tbody>"
 
-    # Dynamic 객실만 비교 대상
-    for rid in DYNAMIC_ROOMS:
+    for rid in rooms_to_show:
+        if rid not in DYNAMIC_ROOMS:
+            continue  # 비교 대상은 DYNAMIC만
         html += f"<tr><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'><b>{rid}</b></td>"
-        
+
         for d in dates:
             date_str = d.strftime('%Y-%m-%d')
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
                 html += "<td style='border:1px solid #ddd; padding:8px; text-align:center;'>-</td>"
                 continue
-            
-            # ★ 포커스 모드: 5번에서 선택한 날짜 외에는 회색 처리
+
             d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
             if use_focus and d_key not in focus_dates:
                 avail_o = curr_match.iloc[0]['Available']
@@ -501,38 +845,31 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 content = f"<span style='font-size:9px;'>포커스외</span><br><span style='font-size:10px;'>{bar_show}</span>"
                 html += f"<td style='{style}' title='5번 선택 외 날짜'>{content}</td>"
                 continue
-            
+
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
-            
+
             applied_info = applied_rates.get(date_str, {})
             applied_bar = applied_info.get('rooms', {}).get(rid)
             memo = applied_info.get('memo', '')
             applied_at = applied_info.get('applied_at_display', '')
             rec_at_apply = applied_info.get('rec_bar_at_apply', {}).get(rid)
-            
-            # 재검토 필요 여부
+
             needs_review = bool(applied_bar and rec_at_apply and rec_at_apply != rec_bar)
-            
-            # ★ [수정] 3번 판도변화 표와 동일한 로직: 어제 시스템 권장 vs 오늘 시스템 권장
+
             prev_rec_bar = None
             if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
-            
-            # 시스템 권장값이 어제와 다른가? (= 3번 표의 ▲ 표시 기준)
-            is_trend_changed = (prev_rec_bar is not None and 
+
+            is_trend_changed = (prev_rec_bar is not None and
                                 str(prev_rec_bar).strip() != str(rec_bar).strip())
-            
-            # ★ '평온한 셀' 판단: 권장값이 어제와 같음 + 재검토 불필요 + 적용=권장
-            is_calm = (applied_bar and 
-                       applied_bar == rec_bar and 
-                       not needs_review and 
-                       not is_trend_changed)
-            
-            # 메모를 툴팁으로 처리
+
+            is_calm = (applied_bar and applied_bar == rec_bar and
+                       not needs_review and not is_trend_changed)
+
             tip_parts = []
             if memo: tip_parts.append(f"📝 {memo}")
             if applied_at: tip_parts.append(f"⏰ {applied_at}")
@@ -540,48 +877,45 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             if is_trend_changed: tip_parts.append(f"▲ 이전 권장: {prev_rec_bar} → 현재 권장: {rec_bar}")
             memo_text = " | ".join(tip_parts)
             tooltip = f"title='{memo_text}'" if memo_text else ""
-            
+
             if not applied_bar:
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FAFAFA; color: #999;"
                 content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
             elif needs_review:
-                # 재검토 필요 - 주황 강조 (토글 무관, 항상 강조)
                 style = "border:2px solid #FF6F00; padding:8px; text-align:center; background-color: #FFF3E0; color: #E65100; font-weight:bold;"
                 content = f"⚠️ <b>{applied_bar}</b><br><span style='font-size:9px; color:#FF6F00;'>권장→{rec_bar}</span>"
             elif applied_bar == rec_bar:
-                # 적용 = 권장
                 if highlight_only_changes and is_calm:
-                    # 평온한 셀: 흐리게 처리
                     style = "border:1px solid #eee; padding:8px; text-align:center; background-color: #FAFAFA; color: #BBB;"
                     content = f"<span style='font-size:10px;'>✓ {applied_bar}</span>"
                 elif is_trend_changed:
-                    # 어제와 다름: 진한 초록 + ▲
                     style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
                     content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>이전 {prev_rec_bar}</span>"
                 else:
-                    # 토글 OFF 일 때 평온한 셀 (기존 방식)
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
                     content = f"✅ <b>{applied_bar}</b>"
             else:
-                # 적용 ≠ 권장 (전략 적용)
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FFF3E0; color: #C62828; border: 1.5px dashed #FF8F00;"
                 content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
-                
+
             html += f"<td style='{style}' {tooltip}>{content}</td>"
         html += "</tr>"
     html += "</tbody></table></div>"
     return html
 
-# --- 4-C. 요금 적용 UI (필터 + 일괄변경 강화) ---
+
+# =============================================================================
+# 4-C. 요금 적용 UI
+# =============================================================================
 def render_apply_rate_ui(current_df, applied_rates):
     if current_df.empty: return
     st.markdown("""<div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>⏰ 5. 전략적 요금 오버라이드 (CMS 수동 반영)</div>""", unsafe_allow_html=True)
     st.caption("🔧 특정 일자의 요금을 시스템 권장과 다르게 강제로 묶거나 인상할 때 사용합니다.")
-    
+
     all_dates_full = sorted(current_df['Date'].unique())
     today = date.today()
-    
-    # ---------- 필터 옵션 (NEW) ----------
+
+    # 필터 옵션
     st.markdown("##### 🎚️ 날짜 필터 옵션")
     fcol1, fcol2, fcol3 = st.columns(3)
     with fcol1:
@@ -592,11 +926,9 @@ def render_apply_rate_ui(current_df, applied_rates):
     with fcol3:
         only_review_needed = st.checkbox("⚠️ 재검토 필요한 날짜만 보기", value=False, key="apply_only_review",
                                           help="시스템 권장이 바뀐 오버라이드 날짜만 표시")
-    
-    # 1차 필터: 과거 포함 여부
+
     dates = all_dates_full if include_past else [d for d in all_dates_full if d >= today]
-    
-    # 2차 필터: 오버라이드된 날짜만
+
     if only_overridden:
         overridden_dates = set()
         for d in dates:
@@ -604,8 +936,7 @@ def render_apply_rate_ui(current_df, applied_rates):
             if applied_rates.get(date_str, {}).get('rooms'):
                 overridden_dates.add(d)
         dates = sorted(overridden_dates)
-    
-    # 3차 필터: 재검토 필요한 날짜만
+
     if only_review_needed:
         review_dates = set()
         for d in dates:
@@ -615,39 +946,36 @@ def render_apply_rate_ui(current_df, applied_rates):
                     review_dates.add(d)
                     break
         dates = sorted(review_dates)
-    
-    if not dates: 
+
+    if not dates:
         if only_overridden:
             return st.info("✨ 오버라이드된 날짜가 없습니다.")
         if only_review_needed:
             return st.success("✅ 재검토가 필요한 날짜가 없습니다.")
         return st.warning("⚠️ 선택 가능한 날짜가 없습니다.")
-    
-    # ---------- 누적 날짜 선택 (NEW: 기간+기간, 기간+일자 자유 조합) ----------
+
+    # 누적 날짜 선택
     st.markdown("##### 📅 적용할 날짜 누적 선택")
     st.caption("💡 아래 도구로 기간/일자를 **추가**하면 누적됩니다. 기간+기간, 기간+일자, 일자+일자 자유 조합 가능!")
-    
-    # 누적 선택 저장소
+
     if '_picked_dates' not in st.session_state:
         st.session_state['_picked_dates'] = set()
-    
-    # ---------- [도구 1] 빠른 프리셋 추가 ----------
+
+    # 빠른 프리셋
     with st.container(border=True):
         st.markdown("**🎯 빠른 프리셋 (클릭 시 누적 추가)**")
         pcol1, pcol2, pcol3, pcol4, pcol5 = st.columns(5)
-        
+
         def add_to_picked(new_dates):
-            """선택된 날짜들을 누적 set에 추가 (필터된 dates 안에 있는 것만, date 객체로 정규화)"""
             valid = []
             for d in new_dates:
                 if d in dates:
-                    # pd.Timestamp → datetime.date 정규화
                     if hasattr(d, 'date') and callable(getattr(d, 'date', None)):
                         valid.append(d.date())
                     else:
                         valid.append(d)
             st.session_state['_picked_dates'].update(valid)
-        
+
         with pcol1:
             if st.button("➕ 이번 주", use_container_width=True, key="preset_thisweek"):
                 monday = today - timedelta(days=today.weekday())
@@ -669,26 +997,19 @@ def render_apply_rate_ui(current_df, applied_rates):
         with pcol5:
             if st.button("🗑️ 전체 비우기", use_container_width=True, key="preset_clear"):
                 st.session_state['_picked_dates'] = set()
-                # matrix 캐시도 함께 정리
                 for k in list(st.session_state.keys()):
                     if k.startswith("apply_matrix_data_"):
                         del st.session_state[k]
                 st.rerun()
-    
-    # ---------- [도구 2] 기간 추가 ----------
+
+    # 기간 추가
     with st.container(border=True):
         st.markdown("**📆 기간 추가 (시작일 ~ 종료일)** — 여러 번 누르면 여러 기간 누적!")
         rc1, rc2, rc3 = st.columns([2, 2, 1])
         with rc1:
-            range_start = st.date_input("시작일", value=dates[0], 
-                                         min_value=dates[0], 
-                                         max_value=dates[-1], 
-                                         key="apply_range_start")
+            range_start = st.date_input("시작일", value=dates[0], min_value=dates[0], max_value=dates[-1], key="apply_range_start")
         with rc2:
-            range_end = st.date_input("종료일", value=dates[-1], 
-                                       min_value=dates[0], 
-                                       max_value=dates[-1], 
-                                       key="apply_range_end")
+            range_end = st.date_input("종료일", value=dates[-1], min_value=dates[0], max_value=dates[-1], key="apply_range_end")
         with rc3:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("➕ 이 기간 추가", use_container_width=True, key="apply_range_btn", type="primary"):
@@ -698,8 +1019,8 @@ def render_apply_rate_ui(current_df, applied_rates):
                     new_dates = [d for d in dates if range_start <= d <= range_end]
                     add_to_picked(new_dates)
                     st.rerun()
-    
-    # ---------- [도구 3] 개별 일자 추가 ----------
+
+    # 개별 일자 추가
     with st.container(border=True):
         st.markdown("**📍 개별 일자 추가** — 점 찍듯이 골라서 누적!")
         ic1, ic2 = st.columns([3, 1])
@@ -715,20 +1036,17 @@ def render_apply_rate_ui(current_df, applied_rates):
             if st.button("➕ 일자 추가", use_container_width=True, key="apply_single_add", type="primary"):
                 if single_pick:
                     add_to_picked(single_pick)
-                    # 입력칸 비우기
                     if "apply_single_pick" in st.session_state:
                         del st.session_state["apply_single_pick"]
                     st.rerun()
                 else:
                     st.warning("일자를 먼저 선택하세요.")
-    
-    # ---------- [최종] 선택된 날짜 확인 + 미세조정 ----------
+
     selected_dates = sorted(st.session_state['_picked_dates'])
-    
+
     if not selected_dates:
         return st.info("👆 위 도구로 날짜를 먼저 추가하세요. (기간/일자/프리셋 자유 조합)")
-    
-    # 선택 결과를 보기 좋게 칩 형태로 표시
+
     chips_html = "".join([
         f"<span style='background:#E3F2FD; border:1px solid #1976D2; color:#0D47A1; "
         f"padding:3px 8px; border-radius:12px; margin:2px; font-size:11px; "
@@ -743,8 +1061,7 @@ def render_apply_rate_ui(current_df, applied_rates):
         {chips_html}
     </div>
     """, unsafe_allow_html=True)
-    
-    # 개별 제거(미세조정)
+
     with st.expander("🔧 누적 목록 미세 조정 (제거하고 싶은 날짜 체크 해제)", expanded=False):
         adjusted = st.multiselect(
             "최종 적용할 날짜 (체크 해제하면 제외)",
@@ -760,14 +1077,14 @@ def render_apply_rate_ui(current_df, applied_rates):
                     if k.startswith("apply_matrix_data_"):
                         del st.session_state[k]
                 st.rerun()
-    
+
     if not selected_dates: return st.info("👆 위에서 날짜를 먼저 선택하세요.")
-    
+
     bar_options = ["BAR0"] + [f"BAR{i}" for i in range(1, 9)]
-    
+
     safe_date_str = "".join([d.strftime('%d') for d in selected_dates])
     matrix_key = f"apply_matrix_data_{len(selected_dates)}_{safe_date_str}"
-    
+
     rec_bar_map = {}
     for rid in DYNAMIC_ROOMS:
         for d in selected_dates:
@@ -777,7 +1094,7 @@ def render_apply_rate_ui(current_df, applied_rates):
             if not curr_match.empty:
                 _, rec_bar, _, _ = get_final_values(rid, d, curr_match.iloc[0]['Available'], curr_match.iloc[0]['Total'])
             rec_bar_map[(rid, date_str)] = rec_bar
-    
+
     def build_initial_matrix():
         data = []
         for rid in DYNAMIC_ROOMS:
@@ -789,8 +1106,8 @@ def render_apply_rate_ui(current_df, applied_rates):
                 row_data[col_label] = existing if existing else rec_bar_map.get((rid, date_str), "BAR5")
             data.append(row_data)
         return data
-    
-    # ---------- 빠른 채우기 ----------
+
+    # 빠른 채우기
     st.markdown("**🔧 빠른 채우기**")
     btn_col1, btn_col2, btn_col3, btn_col4 = st.columns(4)
     with btn_col1:
@@ -822,13 +1139,12 @@ def render_apply_rate_ui(current_df, applied_rates):
         if st.button("🔄 저장된 값으로 리셋", use_container_width=True, key="reset_matrix"):
             if matrix_key in st.session_state: del st.session_state[matrix_key]
             st.rerun()
-    
-    # ---------- 일괄 시프트(NEW): 전체 한 단계 올리기/내리기 ----------
+
+    # 일괄 시프트
     st.markdown("**📈 일괄 시프트 (오버라이드 한번에 조정)**")
     sft_col1, sft_col2, sft_col3, sft_col4 = st.columns(4)
-    
+
     def shift_bar(bar_str, step):
-        """BAR1~BAR8 사이에서 step만큼 이동. 음수면 인상(번호 감소), 양수면 인하(번호 증가)"""
         if not bar_str or bar_str == "BAR0":
             return bar_str
         try:
@@ -837,10 +1153,9 @@ def render_apply_rate_ui(current_df, applied_rates):
             return f"BAR{new_n}"
         except:
             return bar_str
-    
+
     with sft_col1:
-        if st.button("⬆️ 한 단계 인상 (BAR↓)", use_container_width=True, key="shift_up_1",
-                     help="모든 셀의 BAR을 한 단계 위로 (예: BAR5→BAR4)"):
+        if st.button("⬆️ 한 단계 인상 (BAR↓)", use_container_width=True, key="shift_up_1"):
             current = st.session_state.get(matrix_key, build_initial_matrix())
             new_data = []
             for row in current:
@@ -852,8 +1167,7 @@ def render_apply_rate_ui(current_df, applied_rates):
             st.session_state[matrix_key] = new_data
             st.rerun()
     with sft_col2:
-        if st.button("⬇️ 한 단계 인하 (BAR↑)", use_container_width=True, key="shift_down_1",
-                     help="모든 셀의 BAR을 한 단계 아래로 (예: BAR5→BAR6)"):
+        if st.button("⬇️ 한 단계 인하 (BAR↑)", use_container_width=True, key="shift_down_1"):
             current = st.session_state.get(matrix_key, build_initial_matrix())
             new_data = []
             for row in current:
@@ -888,87 +1202,113 @@ def render_apply_rate_ui(current_df, applied_rates):
                 new_data.append(new_row)
             st.session_state[matrix_key] = new_data
             st.rerun()
-    
+
     if matrix_key not in st.session_state: st.session_state[matrix_key] = build_initial_matrix()
     matrix_df = pd.DataFrame(st.session_state[matrix_key])
-    
+
     col_config = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
     for d in selected_dates:
         col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
         col_config[col_label] = st.column_config.SelectboxColumn(options=bar_options, required=True, width="small")
-    
+
     edited_matrix = st.data_editor(matrix_df, column_config=col_config, use_container_width=True, hide_index=True, key="apply_matrix_editor_v2")
-    
+
     applied_input = {}
     for idx, row in edited_matrix.iterrows():
         rid = row["객실"]
         for d in selected_dates:
             date_str = d.strftime('%Y-%m-%d')
             col_label = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
-            
             raw_val = row.get(col_label)
             bar_val = str(raw_val).strip().upper() if raw_val and pd.notna(raw_val) else None
-            
             if bar_val and bar_val in bar_options:
                 if d not in applied_input: applied_input[d] = {}
                 applied_input[d][rid] = bar_val
-    
+
     memo = st.text_area("📝 메모 (툴팁 표시용)", placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함", key="apply_memo", height=70)
-    
+
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("💾 선택한 날짜 모두 적용 저장", type="primary", use_container_width=True, key="apply_save_btn"):
+            # 저장 직전 복원 지점 자동 생성 (I 개선)
+            try:
+                if len(selected_dates) >= 3:  # 3일 이상 일괄 저장 시에만
+                    create_restore_point(
+                        label=f"적용 저장 직전 ({len(selected_dates)}일)",
+                        trigger="before_apply_save",
+                    )
+            except: pass
+
             success_count, fail_count = 0, 0
             for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
                 if applied_input.get(d, {}):
-                    # 적용 시점의 시스템 권장 BAR도 같이 저장 (재검토 알림용)
                     rec_at_apply = {}
                     for rid in applied_input[d].keys():
                         rec_at_apply[rid] = rec_bar_map.get((rid, date_str), "BAR5")
-                    
-                    if save_applied_rate(date_str, applied_input[d], memo, rec_at_apply): 
+
+                    prev_payload = applied_rates.get(date_str, {})
+                    prev_rooms = prev_payload.get('rooms', {})
+                    prev_rec_at_apply = prev_payload.get('rec_bar_at_apply', {})
+
+                    if save_applied_rate(date_str, applied_input[d], memo, rec_at_apply,
+                                         prev_rooms=prev_rooms, prev_rec_at_apply=prev_rec_at_apply):
                         success_count += 1
-                    else: 
+                    else:
                         fail_count += 1
             if success_count:
                 st.success(f"✅ {success_count}일 적용 완료! (선택은 그대로 유지됩니다)")
-                # 매트릭스만 정리, 누적 목록은 유지 (작업 흐름 보존)
                 for k in list(st.session_state.keys()):
-                    if k.startswith("apply_matrix_data_"):
+                    if k.startswith("apply_matrix_data_") or k.startswith("_review_map_cache_"):
                         del st.session_state[k]
                 st.rerun()
     with col2:
         if st.button("🗑️ 선택일 적용 기록 해제", use_container_width=True, key="apply_delete_btn"):
+            try:
+                if len(selected_dates) >= 3:
+                    create_restore_point(
+                        label=f"적용 해제 직전 ({len(selected_dates)}일)",
+                        trigger="before_apply_delete",
+                    )
+            except: pass
+
             del_count = 0
             for d in selected_dates:
                 date_str = d.strftime('%Y-%m-%d')
-                if delete_applied_rate(date_str): del_count += 1
+                prev_payload = applied_rates.get(date_str, {})
+                if delete_applied_rate(date_str,
+                                        prev_rooms=prev_payload.get('rooms', {}),
+                                        prev_memo=prev_payload.get('memo', ''),
+                                        prev_rec_at_apply=prev_payload.get('rec_bar_at_apply', {})):
+                    del_count += 1
             if del_count:
                 st.success(f"🗑️ {del_count}일 수동 적용 해제됨 (시스템 권장가로 원복) · 선택은 유지")
                 for k in list(st.session_state.keys()):
-                    if k.startswith("apply_matrix_data_"):
+                    if k.startswith("apply_matrix_data_") or k.startswith("_review_map_cache_"):
                         del st.session_state[k]
                 st.rerun()
-                
-# --- 4-D. 채널 판매가 (적용가 기준 + 판도변화 버그 수정) ---
-def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None, highlight_only_changes=True, focus_dates=None):
-    """채널별 판매가 - 시스템 권장값 변화 기준 + 선택 날짜 포커스
-    
-    highlight_only_changes=True: 변동 없는 평온한 셀은 흐리게 처리
-    focus_dates: 선택된 날짜 set (None이면 전체 활성, 비어있지 않으면 해당 날짜만 활성)
-    """
+
+
+# =============================================================================
+# 4-D. 채널 판매가 (요청 1 적용: items_override 파라미터)
+# =============================================================================
+def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_applied_rates=None,
+                              highlight_only_changes=True, focus_dates=None, items_override=None):
+    """items_override: 외부에서 필터된 items 리스트를 직접 주입 (None이면 promotions에서 로드)"""
     if current_df.empty:
         return ""
-    
-    items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
+
+    if items_override is not None:
+        items_to_show = items_override
+    else:
+        items_to_show = st.session_state.promotions.get(ch_name, {}).get("items", [])
+
     if not items_to_show:
         return f"<div style='padding:10px; color:gray;'>👉 사이드바에서 {ch_name} 상품을 추가해주세요.</div>"
-    
+
     if prev_applied_rates is None:
-        prev_applied_rates = applied_rates  # 안전 기본값
-    
-    # ★ focus_dates 정규화 - pd.Timestamp / date 혼용 방지
+        prev_applied_rates = applied_rates
+
     use_focus = bool(focus_dates)
     if use_focus:
         normalized_focus = set()
@@ -978,11 +1318,11 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
             else:
                 normalized_focus.add(fd)
         focus_dates = normalized_focus
-    
+
     dates = sorted(current_df['Date'].unique())
-    
+
     html = f"""
-    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px; 
+    <div style='margin-top:40px; margin-bottom:10px; font-weight:bold; font-size:18px;
                 padding:10px; background:#E8F5E9; border-left:10px solid #2E7D32;'>
         ✅ {ch_name} 판매가 산출 (최종 동기화 반영)
     </div>
@@ -999,84 +1339,70 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
         color = "red" if wd == '일' else ("blue" if wd == '토' else "black")
         html += f"<th style='border:1px solid #ddd; padding:3px; color:{color};'>{wd}</th>"
     html += "</tr></thead><tbody>"
-    
+
     for item in items_to_show:
         rid = item.get('객실타입', 'Unknown')
         label_text = item.get('상품명', 'No Name')
         label = f"<b>{rid}</b> <span style='color:blue; font-size:10px;'>: {label_text}</span>"
-        
+
         try: discount = float(item.get('할인(%)') or 0)
         except: discount = 0.0
         try: add_price = int(item.get('추가금') or 0)
         except: add_price = 0
-        
+
         border_thick = "border-bottom:3px solid #000;" if rid in ["HDF", "PPV"] else ""
         html += f"<tr style='{border_thick}'>"
         html += f"<td style='border:1px solid #ddd; padding:4px; background:#fff; border-right:3px solid #000; position:sticky; left:0; z-index:1; font-size:11px;'>{label}</td>"
-        
+
         for d in dates:
             date_str = d.strftime('%Y-%m-%d')
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
-            
+
             if curr_match.empty:
                 html += "<td style='border:1px solid #ddd; padding:4px; text-align:center;'>-</td>"
                 continue
-            
+
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            
-            # 1. 오늘의 시스템 권장가
+
             _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
-            
-            # 2. 오늘의 최종 BAR (오버라이드 우선)
+
             applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
             is_applied = applied_bar is not None
             final_bar = applied_bar if is_applied else rec_bar
             base_price = get_bar_price(rid, final_bar)
-            
-            # 3. ★ [수정] 3번 판도변화 표와 동일한 로직: 어제 시스템 권장 vs 오늘 시스템 권장
+
             prev_rec_bar = None
             if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
                     _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
-            
-            # 시스템 권장값이 어제와 다른가? (= 3번 표 ▲ 표시 기준)
-            is_trend_changed = (prev_rec_bar is not None and 
+
+            is_trend_changed = (prev_rec_bar is not None and
                                 str(prev_rec_bar).strip() != str(rec_bar).strip())
-            
-            # 재검토 필요 여부
+
             needs_review = False
             if is_applied and rid in DYNAMIC_ROOMS:
                 needs_review, _, _ = is_review_needed(rid, d, current_df, applied_rates)
-            
+
             try:
                 b_price = float(base_price) if base_price else 0
                 after_disc = b_price * (1 - (discount / 100))
                 final_p = int((math.floor(after_disc / 1000) * 1000) + add_price)
-                
-                # ★ '평온한 셀' 판단: 적용/권장 동일 + 어제와 같음 + 재검토 불필요
-                is_strategic_override = is_applied and (applied_bar != rec_bar)  # 권장과 다른 전략적 적용
-                is_calm = (not is_trend_changed and 
-                           not needs_review and 
-                           not is_strategic_override)
-                
-                # ★ 포커스 모드: 사용자가 5번에서 특정 날짜를 선택했다면
-                #    그 날짜 외에는 무조건 회색 처리 (눈에 안 띄게)
+
+                is_strategic_override = is_applied and (applied_bar != rec_bar)
+                is_calm = (not is_trend_changed and not needs_review and not is_strategic_override)
+
                 d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
                 is_out_of_focus = use_focus and (d_key not in focus_dates)
-                
-                # --- 시각화 로직 ---
+
                 if is_out_of_focus or (highlight_only_changes and is_calm):
-                    # 회색 처리 (포커스 밖 OR 평온한 셀)
                     tooltip = "title='수정 대상 외'" if is_out_of_focus else "title='수정 필요 없음'"
                     style = "background-color: #FAFAFA; color: #BBB; font-weight: normal; border: 1px solid #EEE; padding:4px; text-align:center;"
                     content = f"<span style='font-size:10px;'>{final_p:,}</span><br><span style='font-size:8px; color:#CCC;'>✓{final_bar}</span>"
                     html += f"<td style='{style}' {tooltip}>{content}</td>"
                     continue
-                
-                # 비-평온 셀: 기존 로직대로 강조
-                # A. 판도 변화 시 색상 적용
+
                 if is_trend_changed:
                     bg = BAR_GRADIENT_COLORS.get(final_bar, "#7000FF")
                     txt_color = "white"
@@ -1088,7 +1414,6 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                     font_weight = "normal"
                     trend_icon = ""
 
-                # B. 오버라이드 + 재검토 필요 여부
                 if is_applied and needs_review:
                     border_style = "border: 2px solid #FF6F00; box-shadow: inset 0 0 0 1px #FFD54F;"
                     icon = "⚠️"
@@ -1104,20 +1429,421 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                     icon = ""
                     label_color = "#FFF" if is_trend_changed else "#999"
                     bar_label = f"<span style='font-size:9px; color:{label_color};'>{final_bar}</span>"
-                
+
                 style = f"background-color: {bg}; color: {txt_color}; font-weight: {font_weight}; {border_style}; padding:4px; text-align:center;"
                 content = f"{icon}{trend_icon}{final_p:,}<br>{bar_label}"
-                
+
                 html += f"<td style='{style}'>{content}</td>"
             except:
                 html += "<td style='border:1px solid #ddd; padding:4px; text-align:center;'>-</td>"
-        
+
         html += "</tr>"
-    
+
     html += "</tbody></table></div>"
     return html
 
-# --- 5. 파서 및 DB 로직 ---
+
+# =============================================================================
+# 4-E. 내일 적용될 요금 미리보기 (D 개선)
+# =============================================================================
+def render_tomorrow_preview(current_df, applied_rates):
+    """내일/모레/글피 3일치 요금을 한눈에 카드 형태로"""
+    if current_df.empty:
+        return
+
+    st.markdown("""
+    <div style='margin-top:30px; margin-bottom:15px; font-weight:bold; font-size:18px;
+                padding:10px; background:#E1F5FE; border-left:10px solid #0288D1;'>
+        🌅 D-Day 요금 미리보기 (오늘·내일·모레 CMS 반영가)
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("매일 아침 첫 확인용. 어떤 셀이 강조 표시되었는지 빠르게 체크하세요.")
+
+    targets = []
+    for offset, label in [(0, "오늘"), (1, "내일"), (2, "모레")]:
+        d = TODAY + timedelta(days=offset)
+        if d in set(current_df['Date'].unique()):
+            targets.append((d, label, offset))
+
+    if not targets:
+        st.info("📭 오늘~모레 데이터가 없습니다. 리포트를 업로드하세요.")
+        return
+
+    cols = st.columns(len(targets))
+    for (d, label, offset), col in zip(targets, cols):
+        with col:
+            date_str = d.strftime('%Y-%m-%d')
+            wd = WEEKDAYS_KR[d.weekday()]
+            wd_color = "#D32F2F" if wd == "일" else ("#1976D2" if wd == "토" else "#333")
+
+            applied_info = applied_rates.get(date_str, {})
+            has_applied = bool(applied_info.get('rooms'))
+            memo = applied_info.get('memo', '')
+
+            card_html = f"""
+            <div style='border:2px solid {"#0288D1" if offset==0 else "#90CAF9"}; border-radius:10px;
+                        padding:10px; background:{"#E1F5FE" if offset==0 else "#F5F9FF"};
+                        margin-bottom:10px;'>
+                <div style='font-size:13px; color:#666;'>{label}</div>
+                <div style='font-size:20px; font-weight:bold;'>{d.strftime('%m월 %d일')}
+                    <span style='color:{wd_color}; font-size:14px;'>({wd})</span></div>
+            """
+            if has_applied:
+                card_html += f"<div style='margin-top:5px; padding:3px 6px; background:#FFF3E0; border-radius:4px; font-size:11px; color:#E65100;'>⭐ 오버라이드 적용됨</div>"
+            else:
+                card_html += f"<div style='margin-top:5px; padding:3px 6px; background:#F1F8E9; border-radius:4px; font-size:11px; color:#558B2F;'>📊 시스템 권장가</div>"
+            if memo:
+                card_html += f"<div style='margin-top:5px; font-size:11px; color:#666;'>📝 {memo[:40]}</div>"
+            card_html += "</div>"
+            st.markdown(card_html, unsafe_allow_html=True)
+
+            # 객실별 가격 미니 테이블
+            rows_html = "<table style='width:100%; font-size:11px; border-collapse:collapse;'>"
+            for rid in ALL_ROOMS:
+                cm = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                if cm.empty:
+                    continue
+                avail = cm.iloc[0]['Available']
+                total = cm.iloc[0]['Total']
+                _, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
+                applied_bar = applied_info.get('rooms', {}).get(rid)
+                if applied_bar:
+                    final_bar = applied_bar
+                    final_price = get_bar_price(rid, applied_bar)
+                    star = "⭐"
+                    color = "#D32F2F"
+                else:
+                    final_bar = rec_bar
+                    final_price = rec_price
+                    star = ""
+                    color = "#333"
+                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFF") if rid in DYNAMIC_ROOMS else "#F5F5F5"
+                rows_html += f"<tr><td style='padding:3px; border-bottom:1px solid #EEE;'><b>{rid}</b></td>"
+                rows_html += f"<td style='padding:3px; border-bottom:1px solid #EEE; text-align:center; background:{bg};'>{final_bar}</td>"
+                rows_html += f"<td style='padding:3px; border-bottom:1px solid #EEE; text-align:right; color:{color};'>{star}{final_price:,}</td></tr>"
+            rows_html += "</table>"
+            st.markdown(rows_html, unsafe_allow_html=True)
+
+
+# =============================================================================
+# 4-F. 객실별 7일 픽업 스파크라인 (E 개선)
+# =============================================================================
+def render_pickup_sparklines(current_df):
+    """최근 N일 픽업 추세를 작은 차트로 보여줌 (data_editor의 LineChartColumn 활용)"""
+    if current_df.empty:
+        return
+    st.markdown("""
+    <div style='margin-top:30px; margin-bottom:15px; font-weight:bold; font-size:18px;
+                padding:10px; background:#F3E5F5; border-left:10px solid #7B1FA2;'>
+        📈 객실별 점유 추세 (스파크라인)
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("앞으로 14일 점유율 추이 — 픽업이 가속되는 객실/날짜 패턴을 한눈에 파악")
+
+    # 향후 14일 데이터 추출
+    future_dates = sorted([d for d in current_df['Date'].unique() if d >= TODAY])[:14]
+    if not future_dates:
+        st.info("미래 데이터가 없습니다.")
+        return
+
+    rows = []
+    for rid in ALL_ROOMS:
+        occ_series = []
+        avail_series = []
+        for d in future_dates:
+            m = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            if m.empty:
+                occ_series.append(0)
+                avail_series.append(0)
+                continue
+            avail = m.iloc[0]['Available']
+            total = m.iloc[0]['Total']
+            try:
+                a = float(avail) if pd.notna(avail) else 0.0
+                occ = ((total - a) / total * 100) if total > 0 else 0
+            except:
+                occ = 0
+                a = 0
+            occ_series.append(round(occ, 1))
+            avail_series.append(int(a))
+        rows.append({
+            "객실": rid,
+            "점유율 추이(%)": occ_series,
+            "잔여실 추이": avail_series,
+            "현재 점유율": occ_series[0] if occ_series else 0,
+            "평균 점유율": round(sum(occ_series) / len(occ_series), 1) if occ_series else 0,
+        })
+
+    df_spark = pd.DataFrame(rows)
+    st.data_editor(
+        df_spark,
+        use_container_width=True,
+        hide_index=True,
+        disabled=True,
+        column_config={
+            "객실": st.column_config.TextColumn(width="small"),
+            "점유율 추이(%)": st.column_config.LineChartColumn(
+                "점유율 추이(%)",
+                width="medium",
+                y_min=0,
+                y_max=100,
+            ),
+            "잔여실 추이": st.column_config.LineChartColumn(
+                "잔여실 추이",
+                width="medium",
+            ),
+            "현재 점유율": st.column_config.NumberColumn(format="%.1f%%"),
+            "평균 점유율": st.column_config.NumberColumn(format="%.1f%%"),
+        },
+        key="sparkline_editor",
+    )
+
+
+# =============================================================================
+# 4-G. 모바일 카드 뷰 (G 개선)
+# =============================================================================
+def render_mobile_card_view(current_df, applied_rates):
+    """모바일 친화적 3일 카드 뷰 (가로 스크롤 매트릭스 대안)"""
+    if current_df.empty:
+        return
+    st.markdown("""
+    <div style='margin-top:20px; margin-bottom:10px; font-weight:bold; font-size:16px;
+                padding:8px; background:#FFF8E1; border-left:6px solid #FFA000;'>
+        📱 모바일 뷰 (오늘부터 N일 카드 형태)
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption("출장지/회의 중 빠른 확인용. 표 대신 카드로 봅니다.")
+
+    n_days = st.slider("표시 일수", 1, 7, 3, key="mobile_days_slider")
+
+    target_dates = sorted([d for d in current_df['Date'].unique() if d >= TODAY])[:n_days]
+    if not target_dates:
+        st.info("표시할 미래 데이터가 없습니다.")
+        return
+
+    for d in target_dates:
+        date_str = d.strftime('%Y-%m-%d')
+        wd = WEEKDAYS_KR[d.weekday()]
+        wd_color = "#D32F2F" if wd == "일" else ("#1976D2" if wd == "토" else "#333")
+        is_today = (d == TODAY)
+        applied_info = applied_rates.get(date_str, {})
+        memo = applied_info.get('memo', '')
+
+        st.markdown(f"""
+        <div style='border:2px solid {"#0288D1" if is_today else "#CFD8DC"}; border-radius:10px;
+                    padding:10px; margin:10px 0; background:{"#E1F5FE" if is_today else "#FAFAFA"};'>
+            <div style='display:flex; justify-content:space-between; align-items:center;'>
+                <span style='font-size:18px; font-weight:bold;'>
+                    {d.strftime('%m월 %d일')} <span style='color:{wd_color};'>({wd})</span>
+                    {"🌟 오늘" if is_today else ""}
+                </span>
+                <span style='font-size:11px; color:#666;'>{memo[:30] if memo else ""}</span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        for rid in ALL_ROOMS:
+            cm = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            if cm.empty: continue
+            avail = cm.iloc[0]['Available']
+            total = cm.iloc[0]['Total']
+            occ, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
+            applied_bar = applied_info.get('rooms', {}).get(rid)
+            if applied_bar:
+                final_bar = applied_bar
+                final_price = get_bar_price(rid, applied_bar)
+                mark = "⭐"
+                badge_bg = "#FFEBEE"
+                badge_color = "#C62828"
+            else:
+                final_bar = rec_bar
+                final_price = rec_price
+                mark = ""
+                badge_bg = "#E8F5E9"
+                badge_color = "#2E7D32"
+
+            bg_bar = BAR_GRADIENT_COLORS.get(final_bar, "#F5F5F5") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#ECEFF1"
+
+            try:
+                avail_int = int(float(avail)) if pd.notna(avail) else 0
+            except:
+                avail_int = 0
+
+            st.markdown(f"""
+            <div style='display:flex; justify-content:space-between; align-items:center;
+                        padding:6px 12px; border-bottom:1px solid #EEE; background:white;'>
+                <div style='font-weight:bold; min-width:50px;'>{rid}</div>
+                <div style='background:{bg_bar}; padding:2px 8px; border-radius:4px; font-size:12px; min-width:50px; text-align:center;'>{final_bar}</div>
+                <div style='font-size:13px;'>{mark}<b>{final_price:,}</b></div>
+                <div style='background:{badge_bg}; color:{badge_color}; padding:2px 6px; border-radius:4px; font-size:11px;'>잔{avail_int}/점{occ:.0f}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# 4-H. 변경 이력 조회 UI (C 개선)
+# =============================================================================
+def render_audit_log_ui():
+    """변경 이력 조회 화면"""
+    with st.expander("📋 변경 이력 (Audit Log)", expanded=False):
+        st.caption("모든 적용/해제/일괄삭제/복원 기록이 무제한 보존됩니다.")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            action_filter = st.selectbox(
+                "액션 필터",
+                ["전체", "apply_save", "apply_delete", "bulk_delete", "restore", "restore_create"],
+                key="audit_action_filter"
+            )
+        with col2:
+            date_from = st.date_input("대상 날짜 From", value=date.today() - timedelta(days=30),
+                                       key="audit_date_from")
+        with col3:
+            date_to = st.date_input("대상 날짜 To", value=date.today() + timedelta(days=90),
+                                     key="audit_date_to")
+
+        limit = st.slider("최대 표시 건수", 50, 1000, 200, step=50, key="audit_limit")
+
+        if st.button("🔍 이력 조회", use_container_width=True, key="audit_search_btn"):
+            st.session_state['_audit_loaded'] = True
+
+        if st.session_state.get('_audit_loaded'):
+            logs = load_audit_log(
+                limit=limit,
+                action_filter=None if action_filter == "전체" else action_filter,
+                date_from_str=date_from.strftime("%Y-%m-%d") if date_from else None,
+                date_to_str=date_to.strftime("%Y-%m-%d") if date_to else None,
+            )
+
+            if not logs:
+                st.info("조회된 이력이 없습니다.")
+            else:
+                st.success(f"📜 총 {len(logs)}건")
+
+                # 표 형태로 변환
+                table_rows = []
+                for log in logs:
+                    diffs_str = ""
+                    for diff in log.get('diffs', [])[:5]:
+                        diffs_str += f"{diff.get('room','')}:{diff.get('from','-')}→{diff.get('to','-')} | "
+                    if len(log.get('diffs', [])) > 5:
+                        diffs_str += f"...외 {len(log['diffs'])-5}건"
+                    table_rows.append({
+                        "시각": log.get('logged_at_display', ''),
+                        "액션": log.get('action', ''),
+                        "대상 날짜": log.get('target_date', ''),
+                        "변경 내역": diffs_str[:200],
+                        "메모": (log.get('memo') or '')[:60],
+                    })
+                df_log = pd.DataFrame(table_rows)
+                st.dataframe(df_log, use_container_width=True, hide_index=True, height=400)
+
+        st.divider()
+        st.markdown("**🧹 이력 정리 (무제한 보존 → 수동 정리)**")
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            cleanup_before = st.date_input("이 날짜 이전 이력 삭제",
+                                            value=date.today() - timedelta(days=180),
+                                            key="audit_cleanup_before")
+        with cc2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🗑️ 정리 실행", key="audit_cleanup_btn"):
+                cnt = cleanup_audit_log(before_date_str=cleanup_before.strftime("%Y-%m-%d"))
+                st.success(f"✅ {cnt}건 정리 완료")
+                st.rerun()
+
+
+# =============================================================================
+# 4-I. 복원 지점 UI (I 개선)
+# =============================================================================
+def render_restore_point_ui():
+    """복원 지점 관리 화면"""
+    with st.expander("🛟 복원 지점 (Restore Points)", expanded=False):
+        st.caption("일괄 삭제·시프트·저장 직전에 자동 백업되며, 수동으로도 만들 수 있습니다.")
+
+        # 수동 백업 생성
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            manual_label = st.text_input("백업 라벨 (수동 생성)",
+                                          placeholder="예: 단체예약 반영 전 / 분기 시작 / ...",
+                                          key="restore_manual_label")
+        with col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("📸 지금 백업", use_container_width=True, key="restore_create_btn"):
+                ok, ts = create_restore_point(label=manual_label or "수동 백업", trigger="manual")
+                if ok:
+                    log_audit(action="restore_create", target_date="*",
+                              new_rooms={}, memo=manual_label or "수동 백업")
+                    st.success(f"✅ 백업 완료 ({ts})")
+                    st.rerun()
+
+        st.divider()
+
+        # 백업 목록
+        points = load_restore_points(limit=50)
+        if not points:
+            st.info("아직 저장된 복원 지점이 없습니다.")
+        else:
+            st.markdown(f"**💾 저장된 복원 지점 ({len(points)}개)**")
+            for p in points[:20]:  # 최근 20개만 화면에
+                with st.container(border=True):
+                    pc1, pc2, pc3, pc4 = st.columns([3, 2, 1, 1])
+                    with pc1:
+                        st.markdown(f"**{p.get('label','(라벨 없음)')}**")
+                        st.caption(f"트리거: {p.get('trigger','?')} · 적용 날짜 {p.get('applied_count',0)}개")
+                    with pc2:
+                        st.markdown(f"🕒 {p.get('created_at_display','')}")
+                    with pc3:
+                        if st.button("↩️ 복원", key=f"restore_btn_{p['_id']}", use_container_width=True):
+                            st.session_state['_pending_restore'] = p['_id']
+                            st.session_state['_pending_restore_label'] = p.get('label', '')
+                            st.rerun()
+                    with pc4:
+                        if st.button("🗑️", key=f"restore_del_{p['_id']}", use_container_width=True,
+                                      help="이 복원 지점 삭제"):
+                            delete_restore_point(p['_id'])
+                            st.rerun()
+
+        # 복원 확인 다이얼로그
+        if st.session_state.get('_pending_restore'):
+            st.warning(f"⚠️ 정말 복원하시겠습니까? '{st.session_state.get('_pending_restore_label','')}'\n\n현재 적용 요금이 모두 백업 시점으로 덮어쓰여집니다. (직전 상태도 자동 백업됨)")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button("✅ 예, 복원 실행", type="primary", use_container_width=True, key="restore_confirm"):
+                    ok, msg = restore_from_point(st.session_state['_pending_restore'])
+                    if ok:
+                        st.success(f"✅ {msg}")
+                    else:
+                        st.error(msg)
+                    del st.session_state['_pending_restore']
+                    if '_pending_restore_label' in st.session_state:
+                        del st.session_state['_pending_restore_label']
+                    st.rerun()
+            with cc2:
+                if st.button("❌ 취소", use_container_width=True, key="restore_cancel"):
+                    del st.session_state['_pending_restore']
+                    if '_pending_restore_label' in st.session_state:
+                        del st.session_state['_pending_restore_label']
+                    st.rerun()
+
+        st.divider()
+        st.markdown("**🧹 복원 지점 정리**")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            rp_cleanup_before = st.date_input("이 날짜 이전 복원 지점 삭제",
+                                               value=date.today() - timedelta(days=90),
+                                               key="rp_cleanup_before")
+        with rc2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🗑️ 복원 지점 정리", key="rp_cleanup_btn"):
+                cnt = cleanup_restore_points(before_date_str=rp_cleanup_before.strftime("%Y-%m-%d"))
+                st.success(f"✅ {cnt}개 정리 완료")
+                st.rerun()
+
+
+# =============================================================================
+# 5. 파서 및 DB 로직
+# =============================================================================
 def robust_date_parser(d_val):
     if pd.isna(d_val): return None
     try:
@@ -1128,11 +1854,13 @@ def robust_date_parser(d_val):
     except: pass
     return None
 
+
 def save_channel_configs():
-    db.collection("settings").document("channels").set({"channel_list": st.session_state.channel_list, "promotions": st.session_state.promotions})
+    db.collection(COL_SETTINGS).document("channels").set({"channel_list": st.session_state.channel_list, "promotions": st.session_state.promotions})
+
 
 def load_channel_configs():
-    doc = db.collection("settings").document("channels").get()
+    doc = db.collection(COL_SETTINGS).document("channels").get()
     if doc.exists:
         d = doc.to_dict()
         st.session_state.channel_list = d.get("channel_list", [])
@@ -1141,8 +1869,9 @@ def load_channel_configs():
         st.session_state.channel_list = []
         st.session_state.promotions = {}
 
+
 def get_latest_snapshot():
-    docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
+    docs = db.collection(COL_SNAPSHOTS).order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
@@ -1151,9 +1880,20 @@ def get_latest_snapshot():
         return df, d_dict.get('work_date', '알수없음')
     return pd.DataFrame(), None
 
-# --- 6. 메인 UI ---
+
+# =============================================================================
+# 6. 메인 UI
+# =============================================================================
 st.set_page_config(layout="wide")
 st.title("🏨 엠버퓨어힐 전략 통합 수익관리 시스템")
+
+# 가격 무결성 검증 (F 개선) - 앱 시작 시 1회
+price_warnings = validate_price_tables()
+if price_warnings:
+    with st.expander(f"🚨 가격표 무결성 경고 {len(price_warnings)}건", expanded=False):
+        for w in price_warnings:
+            st.markdown(w)
+        st.caption("⚠️ PRICE_TABLE 또는 FIXED_PRICE_TABLE을 점검하세요.")
 
 if 'channel_list' not in st.session_state: load_channel_configs()
 if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
@@ -1161,17 +1901,29 @@ if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
 if 'manual_bars' not in st.session_state: st.session_state.manual_bars = {}
 
+# =============================================================================
+# 사이드바
+# =============================================================================
 with st.sidebar:
-    # ========== 🎯 포커스 모드 컨트롤 (NEW) ==========
+    # 모바일 뷰 토글 (G 개선)
+    with st.container(border=True):
+        st.markdown("### 📱 디스플레이 모드")
+        view_mode = st.radio(
+            "뷰 선택",
+            ["💻 데스크탑 (전체 매트릭스)", "📱 모바일 (카드 뷰)"],
+            key="view_mode",
+            help="모바일에서는 카드 뷰가 보기 편해요"
+        )
+
+    # 포커스 모드
     picked_count = len(st.session_state.get('_picked_dates', set()))
-    
     with st.container(border=True):
         st.markdown("### 🎯 포커스 모드")
         if picked_count > 0:
             st.markdown(f"<span style='color:#2E7D32; font-weight:bold;'>✅ 5번에서 {picked_count}일 선택됨</span>", unsafe_allow_html=True)
         else:
             st.markdown("<span style='color:#999; font-size:12px;'>⚪ 5번에서 날짜 선택 시 활성화</span>", unsafe_allow_html=True)
-        
+
         focus_for_4 = st.checkbox(
             "4번 권장vs적용표에 적용",
             value=st.session_state.get('focus_for_4', True),
@@ -1184,18 +1936,18 @@ with st.sidebar:
             key='focus_for_easy',
             disabled=(picked_count == 0)
         )
-        
+
         if picked_count > 0:
             if st.button("🗑️ 포커스 선택 비우기", use_container_width=True):
                 st.session_state['_picked_dates'] = set()
                 st.rerun()
-    
+
     st.divider()
-    
+
     st.header("📅 수정 내역 조회 (History)")
-    
+
     try:
-        all_docs = db.collection("daily_snapshots").select(["work_date"]).stream()
+        all_docs = db.collection(COL_SNAPSHOTS).select(["work_date"]).stream()
         saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
         if saved_dates:
             st.markdown("**📌 데이터가 저장된 날짜 (최근 14일)**")
@@ -1206,14 +1958,14 @@ with st.sidebar:
 
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
-        docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
+        docs = db.collection(COL_SNAPSHOTS).where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
         found = False
         for doc in docs:
             d_dict = doc.to_dict()
             st.session_state.today_df = pd.DataFrame(d_dict['data'])
             if not st.session_state.today_df.empty and 'Date' in st.session_state.today_df.columns:
                 st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
-            
+
             if 'prev_data' in d_dict and d_dict['prev_data']:
                 st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
                 if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
@@ -1224,41 +1976,37 @@ with st.sidebar:
             if 'saved_promotions' in d_dict:
                 st.session_state.promotions = d_dict['saved_promotions']
                 st.session_state.channel_list = d_dict.get('saved_channel_list', [])
-            
+
             st.session_state.manual_bars = d_dict.get('saved_manual_bars', {})
-            
             st.session_state.compare_label = f"불러온 과거 기록: {work_day}"
             found = True
         if found: st.success("역사적 스냅샷 로드 완료")
         else: st.warning("해당 날짜의 데이터가 없습니다.")
 
-    # ---------- 특정일 데이터 삭제 (NEW) ----------
+    # 특정일 데이터 삭제
     with st.expander("🗑️ 특정일 데이터 삭제 (위험)", expanded=False):
         st.warning("⚠️ 이 작업은 되돌릴 수 없습니다. 신중히 사용하세요.")
-        
+
         del_day = st.date_input("삭제할 날짜", value=date.today(), key="del_target_date")
         del_day_str = del_day.strftime("%Y-%m-%d")
-        
-        # 해당 날짜에 무엇이 저장되어 있는지 미리 보여주기
+
         try:
-            snap_count = sum(1 for _ in db.collection("daily_snapshots")
-                             .where("work_date", "==", del_day_str).stream())
+            snap_count = sum(1 for _ in db.collection(COL_SNAPSHOTS).where("work_date", "==", del_day_str).stream())
         except Exception:
             snap_count = 0
-        
-        applied_doc = db.collection("applied_rates").document(del_day_str).get()
+
+        applied_doc = db.collection(COL_APPLIED).document(del_day_str).get()
         has_applied = applied_doc.exists
-        
+
         st.markdown(f"""
-        <div style='background:#FAFAFA; padding:8px 12px; border-radius:6px; 
+        <div style='background:#FAFAFA; padding:8px 12px; border-radius:6px;
                     border:1px solid #E0E0E0; font-size:12px; margin:8px 0;'>
             <b>📋 {del_day_str}에 저장된 데이터:</b><br>
             • 일일 스냅샷 (리포트): <b style='color:#1976D2;'>{snap_count}건</b><br>
             • 적용 요금 (오버라이드): <b style='color:#D32F2F;'>{'있음' if has_applied else '없음'}</b>
         </div>
         """, unsafe_allow_html=True)
-        
-        # 삭제 대상 선택
+
         target_options = []
         if snap_count > 0:
             target_options.append(f"📂 일일 스냅샷 ({snap_count}건)")
@@ -1266,120 +2014,117 @@ with st.sidebar:
             target_options.append("⭐ 적용 요금 오버라이드")
         if snap_count > 0 and has_applied:
             target_options.append("💥 둘 다 (전부 삭제)")
-        
+
         if not target_options:
             st.info(f"✨ {del_day_str}에 저장된 데이터가 없습니다.")
         else:
             del_target = st.radio("삭제 대상", target_options, key="del_target_radio")
-            
-            # 안전장치: 확인 체크박스
+
             confirm = st.checkbox(
                 f"☑️ 정말로 **{del_day_str}**의 데이터를 삭제하겠습니다",
                 key="del_confirm_check"
             )
-            
-            if st.button("🗑️ 영구 삭제 실행", 
-                         type="primary", 
-                         disabled=not confirm, 
+
+            if st.button("🗑️ 영구 삭제 실행",
+                         type="primary",
+                         disabled=not confirm,
                          use_container_width=True,
                          key="del_execute_btn"):
                 deleted_snap = 0
                 deleted_applied = False
-                
+
                 try:
-                    # 일일 스냅샷 삭제
+                    # 적용 요금 삭제 전 자동 백업 (I 개선)
+                    if has_applied and ("적용 요금" in del_target or "둘 다" in del_target):
+                        create_restore_point(label=f"{del_day_str} 단일 삭제 직전", trigger="before_single_delete")
+
                     if "스냅샷" in del_target or "둘 다" in del_target:
-                        snap_docs = db.collection("daily_snapshots")\
-                            .where("work_date", "==", del_day_str).stream()
+                        snap_docs = db.collection(COL_SNAPSHOTS).where("work_date", "==", del_day_str).stream()
+                        batch = db.batch()
+                        bc = 0
                         for doc in snap_docs:
-                            doc.reference.delete()
+                            batch.delete(doc.reference)
                             deleted_snap += 1
-                    
-                    # 적용 요금 삭제
+                            bc += 1
+                            if bc >= 400:
+                                batch.commit(); batch = db.batch(); bc = 0
+                        if bc > 0: batch.commit()
+
                     if "적용 요금" in del_target or "둘 다" in del_target:
                         if has_applied:
-                            db.collection("applied_rates").document(del_day_str).delete()
+                            prev_payload = applied_doc.to_dict()
+                            db.collection(COL_APPLIED).document(del_day_str).delete()
                             deleted_applied = True
-                    
+                            log_audit(action="apply_delete", target_date=del_day_str,
+                                      new_rooms={}, old_rooms=prev_payload.get('rooms', {}),
+                                      memo="단일일 직접 삭제 (사이드바)")
+
                     st.cache_data.clear()
-                    
                     msg_parts = []
                     if deleted_snap > 0:
                         msg_parts.append(f"📂 스냅샷 {deleted_snap}건")
                     if deleted_applied:
                         msg_parts.append("⭐ 적용 요금")
-                    
+
                     if msg_parts:
                         st.success(f"🗑️ 삭제 완료: {', '.join(msg_parts)}")
-                        
-                        # 만약 오늘 보고 있는 데이터가 삭제 대상이면 화면 정리
                         if del_day == date.today():
                             st.session_state.today_df = pd.DataFrame()
                             st.session_state.prev_df = pd.DataFrame()
                             st.session_state.compare_label = ""
                             st.info("화면을 초기화합니다. 새 리포트를 업로드하세요.")
-                        
                         st.rerun()
                     else:
                         st.warning("삭제할 데이터를 찾지 못했습니다.")
-                
                 except Exception as e:
                     st.error(f"삭제 실패: {e}")
 
-    # ---------- 일괄 삭제 (기간/전체) ----------
+    # 일괄 삭제
     with st.expander("💥 일괄 삭제 (기간/전체) - 매우 위험", expanded=False):
         st.error("🚨 이 기능은 여러 날짜의 데이터를 한꺼번에 삭제합니다. 매우 신중히 사용하세요.")
-        
+        st.info("💡 일괄 삭제 실행 직전에 자동으로 복원 지점이 만들어집니다. (적용 요금 한정)")
+
         bulk_mode = st.radio(
             "삭제 방식",
             ["📆 기간 (시작일 ~ 종료일)", "🌍 전체 데이터 (모든 날짜)"],
             key="bulk_del_mode"
         )
-        
+
         bulk_target_type = st.radio(
             "삭제 대상",
             ["⭐ 적용 요금만 (오버라이드)", "📂 일일 스냅샷만 (리포트)", "💥 둘 다 (전부)"],
             key="bulk_del_type",
-            help="대부분의 경우 '적용 요금만' 선택하면 오버라이드를 깨끗이 초기화 가능"
         )
-        
-        # 기간 모드일 때만 날짜 입력
+
         if bulk_mode == "📆 기간 (시작일 ~ 종료일)":
             bcol1, bcol2 = st.columns(2)
             with bcol1:
                 bulk_start = st.date_input("시작일", value=date.today(), key="bulk_del_start")
             with bcol2:
                 bulk_end = st.date_input("종료일", value=date.today() + timedelta(days=60), key="bulk_del_end")
-        
-        # 미리보기: 몇 건이 삭제될지 카운트
+
         if st.button("🔍 삭제 대상 미리 보기", use_container_width=True, key="bulk_preview_btn"):
             try:
                 count_snap = 0
                 count_applied = 0
-                
+
                 if bulk_mode == "🌍 전체 데이터 (모든 날짜)":
-                    # 전체 카운트
                     if "스냅샷" in bulk_target_type or "둘 다" in bulk_target_type:
-                        count_snap = sum(1 for _ in db.collection("daily_snapshots").stream())
+                        count_snap = sum(1 for _ in db.collection(COL_SNAPSHOTS).stream())
                     if "적용 요금" in bulk_target_type or "둘 다" in bulk_target_type:
-                        count_applied = sum(1 for _ in db.collection("applied_rates").stream())
+                        count_applied = sum(1 for _ in db.collection(COL_APPLIED).stream())
                 else:
-                    # 기간 카운트
                     s_str = bulk_start.strftime("%Y-%m-%d")
                     e_str = bulk_end.strftime("%Y-%m-%d")
-                    
                     if "스냅샷" in bulk_target_type or "둘 다" in bulk_target_type:
-                        snap_docs = db.collection("daily_snapshots")\
-                            .where("work_date", ">=", s_str)\
-                            .where("work_date", "<=", e_str).stream()
+                        snap_docs = db.collection(COL_SNAPSHOTS).where("work_date", ">=", s_str).where("work_date", "<=", e_str).stream()
                         count_snap = sum(1 for _ in snap_docs)
                     if "적용 요금" in bulk_target_type or "둘 다" in bulk_target_type:
-                        # applied_rates는 document id가 날짜라 list_documents() 사용
-                        applied_docs = db.collection("applied_rates").stream()
+                        applied_docs = db.collection(COL_APPLIED).stream()
                         for doc in applied_docs:
                             if s_str <= doc.id <= e_str:
                                 count_applied += 1
-                
+
                 st.session_state['_bulk_preview'] = {
                     'snap': count_snap,
                     'applied': count_applied,
@@ -1390,8 +2135,7 @@ with st.sidebar:
                 st.rerun()
             except Exception as e:
                 st.error(f"미리보기 실패: {e}")
-        
-        # 미리보기 결과 표시
+
         preview = st.session_state.get('_bulk_preview')
         if preview:
             range_info = ""
@@ -1400,9 +2144,9 @@ with st.sidebar:
                 range_info = f"({s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')})"
             else:
                 range_info = "(전체 데이터)"
-            
+
             st.markdown(f"""
-            <div style='background:#FFEBEE; padding:10px; border-radius:6px; 
+            <div style='background:#FFEBEE; padding:10px; border-radius:6px;
                         border:2px solid #D32F2F; margin:8px 0;'>
                 <b style='color:#B71C1C;'>🎯 삭제 예정 데이터 {range_info}:</b><br>
                 • 📂 일일 스냅샷: <b>{preview['snap']}건</b><br>
@@ -1410,77 +2154,94 @@ with st.sidebar:
                 <span style='font-size:11px; color:#666;'>{preview['target_type']} / {preview['mode']}</span>
             </div>
             """, unsafe_allow_html=True)
-            
+
             total = preview['snap'] + preview['applied']
             if total > 0:
-                # 안전장치: 사용자가 "삭제 확인" 직접 타이핑
                 confirm_text = st.text_input(
                     f"⚠️ 정말 삭제하려면 아래에 **삭제확인**이라고 입력하세요",
                     key="bulk_del_confirm_text",
                     placeholder="삭제확인"
                 )
-                
-                if st.button("💀 일괄 영구 삭제 실행", 
+
+                if st.button("💀 일괄 영구 삭제 실행",
                              type="primary",
                              disabled=(confirm_text != "삭제확인"),
                              use_container_width=True,
                              key="bulk_del_execute"):
                     try:
+                        # 일괄 삭제 직전 자동 백업 (I 개선)
+                        if ("적용 요금" in preview['target_type'] or "둘 다" in preview['target_type']) and preview['applied'] > 0:
+                            create_restore_point(
+                                label=f"일괄삭제 직전 ({preview['applied']}건)",
+                                trigger="before_bulk_delete",
+                            )
+
                         deleted_snap = 0
                         deleted_applied = 0
-                        
+
+                        # H 개선: 배치 삭제로 최적화
                         if preview['mode'] == "🌍 전체 데이터 (모든 날짜)":
-                            # 전체 삭제
                             if "스냅샷" in preview['target_type'] or "둘 다" in preview['target_type']:
-                                for doc in db.collection("daily_snapshots").stream():
-                                    doc.reference.delete()
-                                    deleted_snap += 1
+                                batch = db.batch(); bc = 0
+                                for doc in db.collection(COL_SNAPSHOTS).stream():
+                                    batch.delete(doc.reference); deleted_snap += 1; bc += 1
+                                    if bc >= 400: batch.commit(); batch = db.batch(); bc = 0
+                                if bc > 0: batch.commit()
                             if "적용 요금" in preview['target_type'] or "둘 다" in preview['target_type']:
-                                for doc in db.collection("applied_rates").stream():
-                                    doc.reference.delete()
-                                    deleted_applied += 1
+                                batch = db.batch(); bc = 0
+                                for doc in db.collection(COL_APPLIED).stream():
+                                    batch.delete(doc.reference); deleted_applied += 1; bc += 1
+                                    if bc >= 400: batch.commit(); batch = db.batch(); bc = 0
+                                if bc > 0: batch.commit()
                         else:
-                            # 기간 삭제
                             s, e = preview['range']
                             s_str = s.strftime("%Y-%m-%d")
                             e_str = e.strftime("%Y-%m-%d")
-                            
+
                             if "스냅샷" in preview['target_type'] or "둘 다" in preview['target_type']:
-                                snap_docs = db.collection("daily_snapshots")\
-                                    .where("work_date", ">=", s_str)\
-                                    .where("work_date", "<=", e_str).stream()
+                                batch = db.batch(); bc = 0
+                                snap_docs = db.collection(COL_SNAPSHOTS).where("work_date", ">=", s_str).where("work_date", "<=", e_str).stream()
                                 for doc in snap_docs:
-                                    doc.reference.delete()
-                                    deleted_snap += 1
-                            
+                                    batch.delete(doc.reference); deleted_snap += 1; bc += 1
+                                    if bc >= 400: batch.commit(); batch = db.batch(); bc = 0
+                                if bc > 0: batch.commit()
+
                             if "적용 요금" in preview['target_type'] or "둘 다" in preview['target_type']:
-                                applied_docs = db.collection("applied_rates").stream()
+                                batch = db.batch(); bc = 0
+                                applied_docs = db.collection(COL_APPLIED).stream()
                                 for doc in applied_docs:
                                     if s_str <= doc.id <= e_str:
-                                        doc.reference.delete()
-                                        deleted_applied += 1
-                        
+                                        batch.delete(doc.reference); deleted_applied += 1; bc += 1
+                                        if bc >= 400: batch.commit(); batch = db.batch(); bc = 0
+                                if bc > 0: batch.commit()
+
+                        log_audit(action="bulk_delete", target_date="*", new_rooms={},
+                                  memo=f"{preview['target_type']} / {preview['mode']}",
+                                  extra={'deleted_snap': deleted_snap, 'deleted_applied': deleted_applied, 'range': str(preview.get('range'))})
+
                         st.cache_data.clear()
                         del st.session_state['_bulk_preview']
-                        
-                        # 화면 정리
+
                         st.session_state.today_df = pd.DataFrame()
                         st.session_state.prev_df = pd.DataFrame()
                         st.session_state.compare_label = ""
                         st.session_state.manual_bars = {}
                         if '_picked_dates' in st.session_state:
                             st.session_state['_picked_dates'] = set()
-                        
+                        # 캐시 정리
+                        for k in list(st.session_state.keys()):
+                            if k.startswith("_review_map_cache_"):
+                                del st.session_state[k]
+
                         st.success(f"🗑️ 일괄 삭제 완료! 스냅샷 {deleted_snap}건, 적용 요금 {deleted_applied}건")
                         st.info("화면을 초기화했습니다. 새 리포트를 업로드하세요.")
                         st.rerun()
-                    
+
                     except Exception as e:
                         st.error(f"일괄 삭제 실패: {e}")
             else:
                 st.success("✨ 삭제할 데이터가 없습니다.")
-        
-        # 미리보기 리셋 버튼
+
         if preview:
             if st.button("🔄 미리보기 리셋", use_container_width=True, key="bulk_preview_reset"):
                 del st.session_state['_bulk_preview']
@@ -1501,11 +2262,11 @@ with st.sidebar:
                 st.session_state.channel_list.remove(ch)
                 st.session_state.promotions.pop(ch, None)
                 save_channel_configs(); st.rerun()
-            
+
             st.info("표에서 바로 수정/추가/삭제 하세요.")
             current_items = st.session_state.promotions[ch].get("items", [])
             df_editor = pd.DataFrame(current_items)
-            
+
             if df_editor.empty:
                 df_editor = pd.DataFrame(columns=["객실타입", "상품명", "할인(%)", "추가금"])
 
@@ -1539,7 +2300,7 @@ with st.sidebar:
                 p_df = st.session_state.prev_df.copy()
                 p_df['Date'] = p_df['Date'].apply(lambda x: x.isoformat())
                 p_df_dict = p_df.to_dict(orient='records')
-            db.collection("daily_snapshots").add({
+            db.collection(COL_SNAPSHOTS).add({
                 "work_date": date.today().strftime("%Y-%m-%d"),
                 "save_time": datetime.now().isoformat(),
                 "data": t_df.to_dict(orient='records'),
@@ -1550,16 +2311,18 @@ with st.sidebar:
             })
             st.success("저장 완료!")
 
-# --- 7. 파일 로직 (스마트 병합) ---
+# =============================================================================
+# 7. 파일 로직 (스마트 병합)
+# =============================================================================
 if files:
     new_extracted = []
-    ROW_MAP = {4:"GDB", 5:"GDF", 6:"FDB", 7:"FDE", 8:"FPT", 9:"FFD", 10:"HDP", 11:"HDT", 12:"HDF", 13:"PPV"}
+    ROW_MAP = {4: "GDB", 5: "GDF", 6: "FDB", 7: "FDE", 8: "FPT", 9: "FFD", 10: "HDP", 11: "HDT", 12: "HDF", 13: "PPV"}
 
     for f in files:
         date_tag = re.search(r'\d{8}', f.name).group() if re.search(r'\d{8}', f.name) else f.name
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
-        
+
         for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
@@ -1570,7 +2333,7 @@ if files:
 
     if new_extracted:
         new_df = pd.DataFrame(new_extracted)
-        
+
         if st.session_state.prev_df.empty:
             latest_db, save_dt = get_latest_snapshot()
             if not latest_db.empty:
@@ -1586,241 +2349,314 @@ if files:
             combined = pd.concat([new_df, st.session_state.today_df]).drop_duplicates(subset=['Date', 'RoomID'], keep='first')
             st.session_state.today_df = combined.sort_values(by=['Date', 'RoomID'])
 
-# --- 8. 메인 출력 ---
+    # 새 파일 업로드 시 리뷰 캐시 정리
+    for k in list(st.session_state.keys()):
+        if k.startswith("_review_map_cache_"):
+            del st.session_state[k]
+
+# =============================================================================
+# 8. 메인 출력
+# =============================================================================
 if not st.session_state.today_df.empty:
     curr, prev = st.session_state.today_df, st.session_state.prev_df
-    
+
     if st.session_state.compare_label:
         st.info(f"ℹ️ {st.session_state.compare_label}")
-    
-    all_dates = sorted(curr['Date'].unique())
-    st.markdown(f"""
-    <div style='background:#E3F2FD; padding:10px 15px; border-radius:8px; margin:15px 0; 
-                border-left:5px solid #1976D2;'>
-        📅 <b>오늘 기준:</b> {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[TODAY.weekday()]}) · 
-        기본적으로 <b>오늘 이후</b>만 표시됩니다. 과거 보려면 아래 체크박스 활성화하세요.
-    </div>
-    """, unsafe_allow_html=True)
-    
-    visible_dates = date_filter_toggle("main", all_dates, default_show_past=False)
-    
-    curr_filtered = filter_df_by_dates(curr, visible_dates)
-    prev_filtered = filter_df_by_dates(prev, visible_dates) if not prev.empty else prev
-    
-    if curr_filtered.empty:
-        st.warning("⚠️ 표시할 날짜가 없습니다. 위 체크박스를 활성화하거나 파일을 업로드하세요.")
-    else:
+
+    # 모바일 뷰면 카드만 보여주고 끝 (G 개선)
+    if st.session_state.get('view_mode', "").startswith("📱"):
         applied_rates_data = load_applied_rates()
-        
-        # ----- 재검토 필요 알림 배너 (NEW) -----
-        review_alerts = []
-        for rid in DYNAMIC_ROOMS:
-            for d in curr_filtered['Date'].unique():
-                needs_review, applied_b, rec_b = is_review_needed(rid, d, curr_filtered, applied_rates_data)
-                if needs_review:
+        render_mobile_card_view(curr, applied_rates_data)
+        st.divider()
+        render_tomorrow_preview(curr, applied_rates_data)
+        st.divider()
+        st.caption("💡 데스크탑 뷰로 전환하면 전체 매트릭스, 5번 오버라이드, 채널 판매가 등을 모두 볼 수 있습니다.")
+    else:
+        all_dates = sorted(curr['Date'].unique())
+        st.markdown(f"""
+        <div style='background:#E3F2FD; padding:10px 15px; border-radius:8px; margin:15px 0;
+                    border-left:5px solid #1976D2;'>
+            📅 <b>오늘 기준:</b> {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[TODAY.weekday()]}) ·
+            기본적으로 <b>오늘 이후</b>만 표시됩니다. 과거 보려면 아래 체크박스 활성화하세요.
+        </div>
+        """, unsafe_allow_html=True)
+
+        visible_dates = date_filter_toggle("main", all_dates, default_show_past=False)
+
+        curr_filtered = filter_df_by_dates(curr, visible_dates)
+        prev_filtered = filter_df_by_dates(prev, visible_dates) if not prev.empty else prev
+
+        if curr_filtered.empty:
+            st.warning("⚠️ 표시할 날짜가 없습니다. 위 체크박스를 활성화하거나 파일을 업로드하세요.")
+        else:
+            applied_rates_data = load_applied_rates()
+
+            # D 개선: 내일 미리보기 (최상단)
+            render_tomorrow_preview(curr_filtered, applied_rates_data)
+            st.divider()
+
+            # E 개선: 스파크라인
+            render_pickup_sparklines(curr_filtered)
+            st.divider()
+
+            # 재검토 알림 배너
+            review_map = build_review_map(curr_filtered, applied_rates_data)
+            review_alerts = []
+            for (rid, d), info in review_map.items():
+                if info['needs']:
                     review_alerts.append({
                         '날짜': d.strftime('%m-%d'),
                         '요일': WEEKDAYS_KR[d.weekday()],
                         '객실': rid,
-                        '적용 BAR': applied_b,
-                        '신규 권장': rec_b,
+                        '적용 BAR': info['applied'],
+                        '신규 권장': info['rec'],
                     })
-        
-        if review_alerts:
-            st.markdown(f"""
-            <div style='background:#FFF3E0; border:2px solid #FF6F00; padding:15px; 
-                        border-radius:8px; margin:15px 0; font-size:14px;'>
-                <b style='color:#E65100; font-size:16px;'>⚠️ 재검토 필요 {len(review_alerts)}건 발견!</b><br>
-                오버라이드된 날짜에서 시스템 권장이 변경되었습니다. 5번 섹션에서 '⚠️ 재검토 필요한 날짜만 보기' 필터를 사용하세요.
-            </div>
-            """, unsafe_allow_html=True)
-            
-            with st.expander("📋 재검토 대상 상세 보기", expanded=False):
-                df_alerts = pd.DataFrame(review_alerts)
-                st.dataframe(df_alerts, use_container_width=True, hide_index=True)
-        
-        # 1. 시장 분석 (시스템 권장 요금)
-        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📊 1. 시장 분석 (시스템 권장 기준)", mode="기준"), unsafe_allow_html=True)
-        
-        # 1-A. 실제 최종 요금 판도
-        st.markdown(render_master_table(curr_filtered, prev_filtered, applied_rates=applied_rates_data, title="🎯 1-A. 최종 확정 요금 상태 (시스템 + 전략 적용)", mode="최종결과"), unsafe_allow_html=True)
 
-        st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
-        st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
+            if review_alerts:
+                st.markdown(f"""
+                <div style='background:#FFF3E0; border:2px solid #FF6F00; padding:15px;
+                            border-radius:8px; margin:15px 0; font-size:14px;'>
+                    <b style='color:#E65100; font-size:16px;'>⚠️ 재검토 필요 {len(review_alerts)}건 발견!</b><br>
+                    오버라이드된 날짜에서 시스템 권장이 변경되었습니다. 5번 섹션에서 '⚠️ 재검토 필요한 날짜만 보기' 필터를 사용하세요.
+                </div>
+                """, unsafe_allow_html=True)
 
-        # 4. 권장 vs 적용 비교 (변동 강조 + 포커스 모드)
-        st.markdown("---")
-        tcol1, tcol2 = st.columns([1, 3])
-        with tcol1:
-            highlight_changes = st.checkbox(
-                "🎯 변동된 셀만 강조 (4번 + 이지에디터)",
-                value=True,
-                key="highlight_only_changes",
-                help="ON: 권장과 같고 이전과도 동일한 '평온한' 셀은 회색 처리 / OFF: 모든 적용 셀 진하게"
-            )
-        with tcol2:
-            picked_now = st.session_state.get('_picked_dates', set())
-            f4_on = st.session_state.get('focus_for_4', True) and len(picked_now) > 0
-            
-            tip_parts = []
-            if highlight_changes:
-                tip_parts.append("✅ 진짜 손댈 셀만 도드라집니다 (▲ 변동 / ⭐ 전략 / ⚠️ 재검토)")
-            else:
-                tip_parts.append("📋 모든 적용 셀이 진하게 표시")
-            
-            if f4_on:
-                tip_parts.append(f"🎯 <b>포커스: {len(picked_now)}일만 활성</b>")
-            elif len(picked_now) > 0:
-                tip_parts.append(f"⚪ 포커스 OFF (사이드바에서 켜기)")
-            
-            st.markdown(f"<div style='font-size:12px; color:#666;'>{' · '.join(tip_parts)}</div>", unsafe_allow_html=True)
-        
-        # 4번 표 포커스: 사이드바 토글 ON + 누적 선택 있을 때만 적용
-        focus_for_4_table = picked_now if f4_on else None
-        
-        st.markdown(render_applied_vs_recommend_table(
-            curr_filtered, applied_rates_data, 
-            prev_df=prev_filtered, 
-            prev_applied_rates=applied_rates_data,
-            highlight_only_changes=highlight_changes,
-            focus_dates=focus_for_4_table
-        ), unsafe_allow_html=True)
+                with st.expander("📋 재검토 대상 상세 보기", expanded=False):
+                    df_alerts = pd.DataFrame(review_alerts)
+                    st.dataframe(df_alerts, use_container_width=True, hide_index=True)
 
-        # 5. 요금 적용 UI
-        render_apply_rate_ui(curr, applied_rates_data)
+            # 1. 시장 분석
+            st.markdown(render_master_table(curr_filtered, prev_filtered, title="📊 1. 시장 분석 (시스템 권장 기준)", mode="기준"), unsafe_allow_html=True)
 
-    # === 전략적 판도 오버라이드 (Admin Only) ===
-    with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
-        st.write("※ 여기서 수정한 내용은 오직 하단의 '✅ 판매가 산출' 표와 엑셀 다운로드에만 반영되며, 상단의 시장 분석 데이터는 원본 시스템 계산값을 유지합니다.")
-        dates_list = sorted(st.session_state.today_df['Date'].unique())
-        matrix_data = []
-        
-        for rid in ALL_ROOMS:
-            row_data = {"객실": rid}
-            for d in dates_list:
-                o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                row_data[d.strftime('%m-%d')] = st.session_state.get('manual_bars', {}).get(o_key, "")
-            matrix_data.append(row_data)
-            
-        ed_df = pd.DataFrame(matrix_data)
-        
-        col_config = {"객실": st.column_config.TextColumn(disabled=True)}
-        edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
-        
-        if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
-            new_manual_bars = {}
-            for idx, row in edited_matrix.iterrows():
-                rid = row["객실"]
-                for d in dates_list:
-                    val = str(row[d.strftime('%m-%d')]).strip()
-                    if val and val.upper() not in ["NONE", "NAN", ""]:
-                        key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                        new_manual_bars[key] = val.upper()
-            st.session_state.manual_bars = new_manual_bars
-            st.success("수동 오버라이드가 하단 판매가 리포트에 적용되었습니다.")
-            st.rerun()
+            # 1-A. 최종 확정
+            st.markdown(render_master_table(curr_filtered, prev_filtered, applied_rates=applied_rates_data, title="🎯 1-A. 최종 확정 요금 상태 (시스템 + 전략 적용)", mode="최종결과"), unsafe_allow_html=True)
 
-    st.divider()
+            st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
+            st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
 
-    # 채널 판매가 (이지에디터) - 변동 강조 + 사이드바 포커스 토글
-    if st.session_state.channel_list:
-        hlc = st.session_state.get("highlight_only_changes", True)
-        
-        # 사이드바 포커스 토글 + 누적 선택 있을 때만 포커스 적용
-        picked = st.session_state.get('_picked_dates', set())
-        easy_focus_on = st.session_state.get('focus_for_easy', True) and len(picked) > 0
-        focus_dates = picked if easy_focus_on else None
-        
-        focus_info = ""
-        if focus_dates:
-            focus_info = f"🎯 <b>포커스 모드 ON</b>: 5번에서 선택한 <b>{len(focus_dates)}일</b>만 색칠 / 나머지는 회색"
-        elif len(picked) > 0:
-            focus_info = "⚪ <b>포커스 모드 OFF</b>: 사이드바 토글로 켤 수 있음 (현재는 전체 색칠)"
-        else:
-            focus_info = "🌐 <b>전체 모드</b>: 5번에서 날짜 선택 시 그 기간만 집중 표시 가능"
-        
-        st.markdown(f"""
-        <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
-            💡 <b>채널 판매가 표기 규칙</b> {'(🎯 변동만 강조 ON)' if hlc else '(📋 전체 보기)'}<br>
-            <span style='color:#1976D2;'>{focus_info}</span><br>
-            - <b>회색 + 작은 글씨</b>: 수정 불필요 또는 포커스 외 날짜<br>
-            - 배경색(그라데이션) ▲: 시스템 권장값이 변동된 셀 (3번 판도변화 표와 동일)<br>
-            - 붉은 점선 + ⭐: 수동으로 전략적 오버라이드한 날짜 (권장과 다름)<br>
-            - 주황 테두리 + ⚠️: 오버라이드 후 시스템 권장이 바뀐 '재검토 필요' 날짜
-        </div>
-        """, unsafe_allow_html=True)
-        
-        for ch in st.session_state.channel_list:
-            st.markdown(render_channel_sale_table(
-                curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data,
-                highlight_only_changes=hlc,
-                focus_dates=focus_dates
+            # 4. 권장 vs 적용 비교 (A 개선: 행 필터)
+            st.markdown("---")
+            tcol1, tcol2, tcol3 = st.columns([2, 2, 3])
+            with tcol1:
+                highlight_changes = st.checkbox(
+                    "🎯 변동된 셀만 강조 (4번 + 이지에디터)",
+                    value=True,
+                    key="highlight_only_changes",
+                    help="ON: 권장과 같고 이전과도 동일한 '평온한' 셀은 회색 / OFF: 모든 적용 셀 진하게"
+                )
+            with tcol2:
+                room_filter_4 = st.multiselect(
+                    "🔍 4번 표 객실 필터",
+                    options=DYNAMIC_ROOMS,
+                    default=DYNAMIC_ROOMS,
+                    key="room_filter_4",
+                    help="비교표에 보고 싶은 객실만 선택"
+                )
+            with tcol3:
+                picked_now = st.session_state.get('_picked_dates', set())
+                f4_on = st.session_state.get('focus_for_4', True) and len(picked_now) > 0
+
+                tip_parts = []
+                if highlight_changes:
+                    tip_parts.append("✅ 진짜 손댈 셀만 도드라짐")
+                else:
+                    tip_parts.append("📋 모든 적용 셀 진하게")
+                if f4_on:
+                    tip_parts.append(f"🎯 <b>포커스: {len(picked_now)}일만 활성</b>")
+                elif len(picked_now) > 0:
+                    tip_parts.append("⚪ 포커스 OFF")
+                st.markdown(f"<div style='font-size:12px; color:#666;'>{' · '.join(tip_parts)}</div>", unsafe_allow_html=True)
+
+            focus_for_4_table = picked_now if f4_on else None
+
+            st.markdown(render_applied_vs_recommend_table(
+                curr_filtered, applied_rates_data,
+                prev_df=prev_filtered,
+                prev_applied_rates=applied_rates_data,
+                highlight_only_changes=highlight_changes,
+                focus_dates=focus_for_4_table,
+                room_filter=room_filter_4,
             ), unsafe_allow_html=True)
 
-    st.divider()
-    
-    # --- 엑셀 다운로드 기능 ---
-    st.subheader("📥 데이터 엑셀 다운로드")
-    st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 엑셀 파일로 다운로드합니다.")
-    
-    def generate_excel():
-        output = io.BytesIO()
-        export_data = []
-        applied_rates_export = load_applied_rates()
-        
-        for idx, row in st.session_state.today_df.iterrows():
-            d = row['Date']
-            rid = row['RoomID']
-            date_str = d.strftime('%Y-%m-%d')
-            
-            occ, rec_bar, rec_price, _ = get_final_values(rid, d, row['Available'], row['Total'])
-            
-            applied_bar = applied_rates_export.get(date_str, {}).get('rooms', {}).get(rid)
-            applied_memo = applied_rates_export.get(date_str, {}).get('memo', '')
-            applied_at = applied_rates_export.get(date_str, {}).get('applied_at_display', '')
-            rec_at_apply = applied_rates_export.get(date_str, {}).get('rec_bar_at_apply', {}).get(rid, '')
-            
-            if applied_bar:
-                applied_price = get_bar_price(rid, applied_bar)
-                status = "✅ 적용됨"
-                is_diff = "⚠️ 다름" if applied_bar != rec_bar else "일치"
-                # 재검토 필요 여부
-                needs_review = "⚠️ 재검토" if (rec_at_apply and rec_at_apply != rec_bar) else "OK"
-            else:
-                applied_price = None
-                status = "⚪ 대기중"
-                is_diff = "-"
-                needs_review = "-"
-            
-            is_past = "📜 과거" if d < TODAY else "🔮 미래"
-            
-            export_data.append({
-                "날짜": date_str,
-                "요일": WEEKDAYS_KR[d.weekday()],
-                "과거/미래": is_past,
-                "객실타입": rid,
-                "잔여객실": row['Available'],
-                "전체객실": row['Total'],
-                "점유율(%)": round(occ, 1),
-                "🎯권장BAR": rec_bar,
-                "🎯권장가": rec_price,
-                "⭐적용BAR": applied_bar if applied_bar else "-",
-                "⭐적용가": applied_price if applied_price else "-",
-                "적용시점권장": rec_at_apply if rec_at_apply else "-",
-                "재검토": needs_review,
-                "상태": status,
-                "권장vs적용": is_diff,
-                "메모": applied_memo,
-                "반영일시": applied_at
-            })
-        df_export = pd.DataFrame(export_data)
-        with pd.ExcelWriter(output) as writer:
-            df_export.to_excel(writer, index=False, sheet_name='권장vs적용')
-        return output.getvalue()
+            # 5. 요금 적용 UI
+            render_apply_rate_ui(curr, applied_rates_data)
 
-    st.download_button(
-        label="📊 엑셀 다운로드 실행",
-        data=generate_excel(),
-        file_name=f"AmberPureHill_Report_{date.today().strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        # 전략적 판도 오버라이드
+        with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
+            st.write("※ 여기서 수정한 내용은 오직 하단의 '✅ 판매가 산출' 표와 엑셀 다운로드에만 반영되며, 상단의 시장 분석 데이터는 원본 시스템 계산값을 유지합니다.")
+            dates_list = sorted(st.session_state.today_df['Date'].unique())
+            matrix_data = []
+
+            for rid in ALL_ROOMS:
+                row_data = {"객실": rid}
+                for d in dates_list:
+                    o_key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                    row_data[d.strftime('%m-%d')] = st.session_state.get('manual_bars', {}).get(o_key, "")
+                matrix_data.append(row_data)
+
+            ed_df = pd.DataFrame(matrix_data)
+            col_config = {"객실": st.column_config.TextColumn(disabled=True)}
+            edited_matrix = st.data_editor(ed_df, use_container_width=True, hide_index=True, column_config=col_config)
+
+            if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
+                new_manual_bars = {}
+                for idx, row in edited_matrix.iterrows():
+                    rid = row["객실"]
+                    for d in dates_list:
+                        val = str(row[d.strftime('%m-%d')]).strip()
+                        if val and val.upper() not in ["NONE", "NAN", ""]:
+                            key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                            new_manual_bars[key] = val.upper()
+                st.session_state.manual_bars = new_manual_bars
+                st.success("수동 오버라이드가 하단 판매가 리포트에 적용되었습니다.")
+                st.rerun()
+
+        st.divider()
+
+        # 채널 판매가 (요청 1 + A 개선)
+        if st.session_state.channel_list:
+            hlc = st.session_state.get("highlight_only_changes", True)
+            picked = st.session_state.get('_picked_dates', set())
+            easy_focus_on = st.session_state.get('focus_for_easy', True) and len(picked) > 0
+            focus_dates = picked if easy_focus_on else None
+
+            focus_info = ""
+            if focus_dates:
+                focus_info = f"🎯 <b>포커스 모드 ON</b>: 5번에서 선택한 <b>{len(focus_dates)}일</b>만 색칠"
+            elif len(picked) > 0:
+                focus_info = "⚪ <b>포커스 모드 OFF</b>: 사이드바 토글로 켤 수 있음"
+            else:
+                focus_info = "🌐 <b>전체 모드</b>: 5번에서 날짜 선택 시 그 기간만 집중 표시 가능"
+
+            st.markdown(f"""
+            <div style='background:#FFF3E0; padding:10px 15px; border-radius:8px; margin:15px 0;'>
+                💡 <b>채널 판매가 표기 규칙</b> {'(🎯 변동만 강조 ON)' if hlc else '(📋 전체 보기)'}<br>
+                <span style='color:#1976D2;'>{focus_info}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ===== 요청 1: 채널별 객실/상품 행 필터 =====
+            for ch in st.session_state.channel_list:
+                items_all = st.session_state.promotions.get(ch, {}).get("items", [])
+                if not items_all:
+                    st.markdown(render_channel_sale_table(
+                        curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data,
+                        highlight_only_changes=hlc, focus_dates=focus_dates,
+                    ), unsafe_allow_html=True)
+                    continue
+
+                with st.container(border=True):
+                    fc1, fc2, fc3 = st.columns([2, 2, 1])
+                    with fc1:
+                        rooms_in_ch = sorted({it.get('객실타입') for it in items_all if it.get('객실타입')})
+                        picked_rooms = st.multiselect(
+                            f"🔍 [{ch}] 객실타입 필터",
+                            options=rooms_in_ch,
+                            default=rooms_in_ch,
+                            key=f"filter_rooms_{ch}",
+                            help="보고 싶은 객실타입만 선택"
+                        )
+                    with fc2:
+                        items_by_room = [it for it in items_all if it.get('객실타입') in picked_rooms]
+                        product_labels = [f"{it.get('객실타입')} · {it.get('상품명')}" for it in items_by_room]
+                        picked_products = st.multiselect(
+                            f"🎁 [{ch}] 개별 상품 필터",
+                            options=product_labels,
+                            default=product_labels,
+                            key=f"filter_products_{ch}",
+                            help="특정 상품만 보고 싶을 때"
+                        )
+                    with fc3:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("전체 보기", key=f"reset_filter_{ch}", use_container_width=True):
+                            for k in [f"filter_rooms_{ch}", f"filter_products_{ch}"]:
+                                if k in st.session_state:
+                                    del st.session_state[k]
+                            st.rerun()
+
+                filtered_items = [it for it in items_by_room
+                                  if f"{it.get('객실타입')} · {it.get('상품명')}" in picked_products]
+
+                if not filtered_items:
+                    st.info(f"🔍 [{ch}] 필터 조건에 맞는 상품이 없습니다.")
+                    continue
+
+                # items_override 파라미터로 안전하게 주입 (원본 보호)
+                st.markdown(render_channel_sale_table(
+                    curr_filtered, prev_filtered, ch, applied_rates_data, applied_rates_data,
+                    highlight_only_changes=hlc, focus_dates=focus_dates,
+                    items_override=filtered_items,
+                ), unsafe_allow_html=True)
+
+        st.divider()
+
+        # 변경 이력 & 복원 지점 UI
+        render_audit_log_ui()
+        render_restore_point_ui()
+
+        st.divider()
+
+        # 엑셀 다운로드
+        st.subheader("📥 데이터 엑셀 다운로드")
+        st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 엑셀 파일로 다운로드합니다.")
+
+        def generate_excel():
+            output = io.BytesIO()
+            export_data = []
+            applied_rates_export = load_applied_rates()
+
+            for idx, row in st.session_state.today_df.iterrows():
+                d = row['Date']
+                rid = row['RoomID']
+                date_str = d.strftime('%Y-%m-%d')
+
+                occ, rec_bar, rec_price, _ = get_final_values(rid, d, row['Available'], row['Total'])
+
+                applied_bar = applied_rates_export.get(date_str, {}).get('rooms', {}).get(rid)
+                applied_memo = applied_rates_export.get(date_str, {}).get('memo', '')
+                applied_at = applied_rates_export.get(date_str, {}).get('applied_at_display', '')
+                rec_at_apply = applied_rates_export.get(date_str, {}).get('rec_bar_at_apply', {}).get(rid, '')
+
+                if applied_bar:
+                    applied_price = get_bar_price(rid, applied_bar)
+                    status = "✅ 적용됨"
+                    is_diff = "⚠️ 다름" if applied_bar != rec_bar else "일치"
+                    needs_review = "⚠️ 재검토" if (rec_at_apply and rec_at_apply != rec_bar) else "OK"
+                else:
+                    applied_price = None
+                    status = "⚪ 대기중"
+                    is_diff = "-"
+                    needs_review = "-"
+
+                is_past = "📜 과거" if d < TODAY else "🔮 미래"
+
+                export_data.append({
+                    "날짜": date_str,
+                    "요일": WEEKDAYS_KR[d.weekday()],
+                    "과거/미래": is_past,
+                    "객실타입": rid,
+                    "잔여객실": row['Available'],
+                    "전체객실": row['Total'],
+                    "점유율(%)": round(occ, 1),
+                    "🎯권장BAR": rec_bar,
+                    "🎯권장가": rec_price,
+                    "⭐적용BAR": applied_bar if applied_bar else "-",
+                    "⭐적용가": applied_price if applied_price else "-",
+                    "적용시점권장": rec_at_apply if rec_at_apply else "-",
+                    "재검토": needs_review,
+                    "상태": status,
+                    "권장vs적용": is_diff,
+                    "메모": applied_memo,
+                    "반영일시": applied_at
+                })
+            df_export = pd.DataFrame(export_data)
+            with pd.ExcelWriter(output) as writer:
+                df_export.to_excel(writer, index=False, sheet_name='권장vs적용')
+            return output.getvalue()
+
+        st.download_button(
+            label="📊 엑셀 다운로드 실행",
+            data=generate_excel(),
+            file_name=f"AmberPureHill_Report_{date.today().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
