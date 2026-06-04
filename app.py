@@ -2622,8 +2622,9 @@ if not st.session_state.today_df.empty:
                 room_filter=room_filter_4,
             ), unsafe_allow_html=True)
 
-            # 5. 요금 적용 UI
-            render_apply_rate_ui(curr, applied_rates_data)
+            # 5. 요금 적용 UI (접기/펼치기)
+            with st.expander("⏰ 5. 예외 설정 — 특정 날짜 BAR 고정", expanded=False):
+                render_apply_rate_ui(curr, applied_rates_data)
 
         # 전략적 판도 오버라이드
         with st.expander("🛠️ 전략적 판도 오버라이드 (Admin Only)", expanded=False):
