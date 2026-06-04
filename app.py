@@ -1513,10 +1513,18 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
                     label_color = "#FFF" if is_trend_changed else "#E65100"
                     bar_label = f"<span style='font-size:9px; color:{label_color}; font-weight:bold;'>재검토:{final_bar}</span>"
                 elif is_applied:
-                    border_style = "border: 2px dashed #D32F2F;"
-                    icon = "⭐"
-                    label_color = "#FFF" if is_trend_changed else "#D32F2F"
-                    bar_label = f"<span style='font-size:9px; color:{label_color}; font-weight:bold;'>수동:{final_bar}</span>"
+                    _memo_check = applied_rates.get(date_str, {}).get('memo', '')
+                    _is_auto = isinstance(_memo_check, str) and _memo_check.startswith("[자동갱신]")
+                    if _is_auto:
+                        border_style = "border: 2px dashed #1565C0;"
+                        icon = "🔄"
+                        label_color = "#FFF" if is_trend_changed else "#1565C0"
+                        bar_label = f"<span style='font-size:9px; color:{label_color}; font-weight:bold;'>자동:{final_bar}</span>"
+                    else:
+                        border_style = "border: 2px dashed #D32F2F;"
+                        icon = "⭐"
+                        label_color = "#FFF" if is_trend_changed else "#D32F2F"
+                        bar_label = f"<span style='font-size:9px; color:{label_color}; font-weight:bold;'>수동:{final_bar}</span>"
                 else:
                     border_style = "border: 1px solid #ddd;"
                     icon = ""
