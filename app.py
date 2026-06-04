@@ -535,6 +535,97 @@ def get_bar_price(room_id, bar):
         return PRICE_TABLE.get(room_id, {}).get(bar, 0)
     return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
 
+# =============================================================================
+# 4-A-1-B. 예외 자동 갱신 (신규)
+# =============================================================================
+def auto_update_stale_exceptions(current_df):
+    """새 파일 저장 시 기존 예외(applied_rates) 자동 갱신.
+
+    규칙:
+    - 권장 BAR 가격 > 예외 BAR 가격  →  권장 BAR로 자동 교체 (판도변화 인상 수용)
+    - 예외 BAR 가격 >= 권장 BAR 가격  →  예외 유지 (더 비싼 예외 고수)
+
+    반환: (갱신된 날짜 수, 상세 로그 리스트)
+    """
+    if current_df.empty:
+        return 0, []
+
+    st.cache_data.clear()
+    applied = load_applied_rates()
+    if not applied:
+        return 0, []
+
+    current_dates = set(current_df['Date'].unique())
+    updated_count = 0
+    log_items = []
+
+    for date_str, rate_info in applied.items():
+        try:
+            d = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except Exception:
+            continue
+
+        if d not in current_dates:
+            continue
+
+        existing_rooms = rate_info.get('rooms', {})
+        if not existing_rooms:
+            continue
+
+        new_rooms = {}
+        changed = False
+        date_log = []
+
+        for rid, exc_bar in existing_rooms.items():
+            if rid not in DYNAMIC_ROOMS:
+                new_rooms[rid] = exc_bar
+                continue
+
+            row = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            if row.empty:
+                new_rooms[rid] = exc_bar
+                continue
+
+            _, rec_bar, rec_price, _ = get_final_values(
+                rid, d, row.iloc[0]['Available'], row.iloc[0]['Total']
+            )
+            exc_price = get_bar_price(rid, exc_bar)
+
+            if rec_price > exc_price:
+                new_rooms[rid] = rec_bar
+                if rec_bar != exc_bar:
+                    changed = True
+                    date_log.append(f"{rid}: {exc_bar}→{rec_bar} (권장 {rec_price:,} > 예외 {exc_price:,})")
+            else:
+                new_rooms[rid] = exc_bar
+
+        if changed:
+            rec_at_apply = {}
+            for rid in new_rooms:
+                if rid in DYNAMIC_ROOMS:
+                    row = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+                    if not row.empty:
+                        _, r, _, _ = get_final_values(
+                            rid, d, row.iloc[0]['Available'], row.iloc[0]['Total']
+                        )
+                        rec_at_apply[rid] = r
+
+            memo = rate_info.get('memo', '')
+            auto_note = ("[자동갱신] " + memo).strip() if memo and not memo.startswith("[자동갱신]") else (memo or "[자동갱신]")
+
+            save_applied_rate(
+                date_str, new_rooms,
+                memo=auto_note,
+                rec_at_apply=rec_at_apply,
+                prev_rooms=existing_rooms,
+                prev_rec_at_apply=rate_info.get('rec_bar_at_apply', {}),
+            )
+            updated_count += 1
+            log_items.append({'date': date_str, 'changes': date_log})
+
+    return updated_count, log_items
+
+
 
 # =============================================================================
 # 4-A-2. 변경 이력 (Audit Log) - C 개선
@@ -909,8 +1000,10 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
 # =============================================================================
 def render_apply_rate_ui(current_df, applied_rates):
     if current_df.empty: return
-    st.markdown("""<div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>⏰ 5. 전략적 요금 오버라이드 (CMS 수동 반영)</div>""", unsafe_allow_html=True)
-    st.caption("🔧 특정 일자의 요금을 시스템 권장과 다르게 강제로 묶거나 인상할 때 사용합니다.")
+    st.markdown("""<div style='margin-top:40px; margin-bottom:15px; font-weight:bold; font-size:18px; padding:10px; background:#FFF3E0; border-left:10px solid #FF6F00;'>⏰ 5. 예외 설정 — 특정 날짜 BAR 고정 (파일 재업로드 후에도 유지)</div>""", unsafe_allow_html=True)
+    st.caption("🔧 특정 일자의 요금을 시스템 권장과 다르게 강제로 묶거나 인상할 때 사용합니다. "
+               "여기서 설정한 예외는 이후 파일 재업로드·저장 시에도 유지되며, "
+               "판도변화로 권장가가 예외가보다 높아질 경우 자동으로 권장가로 갱신됩니다.")
 
     all_dates_full = sorted(current_df['Date'].unique())
     today = date.today()
@@ -2309,6 +2402,18 @@ with st.sidebar:
                 "saved_channel_list": st.session_state.channel_list,
                 "saved_manual_bars": st.session_state.manual_bars
             })
+            st.cache_data.clear()
+            # ── 신규: 예외 자동 갱신 (권장가 > 예외가인 경우 자동 인상) ──
+            auto_cnt, auto_log = auto_update_stale_exceptions(st.session_state.today_df)
+            if auto_cnt > 0:
+                changes_html = "".join(
+                    f"<li><b>{item['date']}</b>: {', '.join(item['changes'])}</li>"
+                    for item in auto_log
+                )
+                st.info(f"🔄 예외 {auto_cnt}건 자동 갱신 완료 (권장가 인상 적용)\n\n"
+                        f"아래 이지에디터에 반영되었습니다.")
+                with st.expander(f"📋 자동 갱신 상세 ({auto_cnt}건)", expanded=False):
+                    st.markdown(f"<ul>{changes_html}</ul>", unsafe_allow_html=True)
             st.success("저장 완료!")
 
 # =============================================================================
@@ -2433,6 +2538,45 @@ if not st.session_state.today_df.empty:
 
             st.markdown(render_master_table(curr_filtered, prev_filtered, title="📈 2. 예약 변화량", mode="변화"), unsafe_allow_html=True)
             st.markdown(render_master_table(curr_filtered, prev_filtered, title="🔔 3. 판도 변화", mode="판도변화"), unsafe_allow_html=True)
+
+            # 3-B. 예외 현황 요약 (신규: 현재 활성 예외 한눈에)
+            with st.expander("📌 현재 활성 예외 현황 (파일 저장 시 자동 갱신됨)", expanded=False):
+                st.caption(
+                    "5번에서 설정한 예외들입니다. "
+                    "파일을 저장하면 권장가 > 예외가인 경우 자동으로 권장가로 갱신됩니다."
+                )
+                _exc_applied = load_applied_rates()
+                _exc_dates = sorted(
+                    [ds for ds in _exc_applied if _exc_applied[ds].get('rooms')],
+                    key=lambda x: x
+                )
+                if not _exc_dates:
+                    st.info("현재 설정된 예외가 없습니다. 5번에서 추가하세요.")
+                else:
+                    _exc_rows = []
+                    for _ds in _exc_dates:
+                        try:
+                            _d = datetime.strptime(_ds, '%Y-%m-%d').date()
+                        except Exception:
+                            continue
+                        _info = _exc_applied[_ds]
+                        _rooms_str = ", ".join(
+                            f"{r}={b}" for r, b in sorted(_info.get('rooms', {}).items())
+                        )
+                        _memo = _info.get('memo', '')
+                        _at = _info.get('applied_at_display', '')
+                        _past = "📜" if _d < TODAY else "🔮"
+                        _exc_rows.append({
+                            "": _past,
+                            "날짜": _ds,
+                            "요일": WEEKDAYS_KR[_d.weekday()],
+                            "적용 BAR": _rooms_str,
+                            "메모": _memo[:40],
+                            "갱신일시": _at,
+                        })
+                    _exc_df = pd.DataFrame(_exc_rows)
+                    st.dataframe(_exc_df, use_container_width=True, hide_index=True, height=300)
+                    st.caption(f"총 {len(_exc_rows)}건 활성 예외")
 
             # 4. 권장 vs 적용 비교 (A 개선: 행 필터)
             st.markdown("---")
