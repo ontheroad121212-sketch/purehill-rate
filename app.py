@@ -1320,6 +1320,15 @@ def render_apply_rate_ui(current_df, applied_rates):
 
     memo = st.text_area("📝 메모 (툴팁 표시용)", placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함", key="apply_memo", height=70)
 
+    # 저장 후 선택 초기화 옵션 (기본 ON → 순차 저장 편의)
+    clear_after_save = st.checkbox(
+        "💡 저장 후 날짜 선택 초기화 (다른 기간 이어서 저장할 때 편리)",
+        value=True,
+        key="apply_clear_after_save",
+        help="ON: 저장 완료 후 선택 목록을 비워서 다음 기간을 새로 선택할 수 있습니다. "
+             "OFF: 선택을 유지합니다."
+    )
+
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("💾 선택한 날짜 모두 적용 저장", type="primary", use_container_width=True, key="apply_save_btn"):
@@ -1350,7 +1359,12 @@ def render_apply_rate_ui(current_df, applied_rates):
                     else:
                         fail_count += 1
             if success_count:
-                st.success(f"✅ {success_count}일 적용 완료! (선택은 그대로 유지됩니다)")
+                _clear = st.session_state.get("apply_clear_after_save", True)
+                if _clear:
+                    st.success(f"✅ {success_count}일 저장 완료! 날짜 선택이 초기화됐습니다 — 다음 기간을 선택하세요.")
+                    st.session_state['_picked_dates'] = set()
+                else:
+                    st.success(f"✅ {success_count}일 적용 완료! (선택 유지)")
                 for k in list(st.session_state.keys()):
                     if k.startswith("apply_matrix_data_") or k.startswith("_review_map_cache_"):
                         del st.session_state[k]
