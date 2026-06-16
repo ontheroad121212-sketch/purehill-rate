@@ -42,6 +42,17 @@ PRICE_TABLE = {
     "HDT": {"BAR0": 729000, "BAR8": 250000, "BAR7": 288000, "BAR6": 331000, "BAR5": 380000, "BAR4": 437000, "BAR3": 502000, "BAR2": 577000, "BAR1": 663000},
     "HDF": {"BAR0": 916000, "BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
 }
+# FPT 펫룸 독립 BAR 요금표 (호텔 전체 OCC 기준, 500,000~900,000)
+FPT_TABLE = {
+    "BAR0": 900000, "BAR1": 850000, "BAR2": 800000, "BAR3": 750000,
+    "BAR4": 700000, "BAR5": 650000, "BAR6": 600000, "BAR7": 550000, "BAR8": 500000,
+}
+# PPV 풀빌라 럭셔리 독립 BAR 요금표 (호텔 전체 OCC 기준, 1,290,000~2,490,000)
+PPV_TABLE = {
+    "BAR0": 2490000, "BAR1": 2340000, "BAR2": 2190000, "BAR3": 2040000,
+    "BAR4": 1890000, "BAR5": 1740000, "BAR6": 1590000, "BAR7": 1440000, "BAR8": 1290000,
+}
+# 하위 호환용 (구 스냅샷 읽기 등에 사용될 수 있음, 신규 산출에는 미사용)
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 298000, "UND2": 298000, "MID1": 298000, "MID2": 298000, "UPP1": 298000, "UPP2": 298000},
     "GDF": {"UND1": 375000, "UND2": 410000, "MID1": 410000, "MID2": 488000, "UPP1": 488000, "UPP2": 578000},
@@ -49,7 +60,6 @@ FIXED_PRICE_TABLE = {
     "FPT": {"UND1": 500000, "UND2": 550000, "MID1": 600000, "MID2": 650000, "UPP1": 700000, "UPP2": 750000},
     "PPV": {"UND1": 1104000, "UND2": 1154000, "MID1": 1154000, "MID2": 1304000, "UPP1": 1304000, "UPP2": 1554000},
 }
-FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, "PPV": 1704000}
 
 TODAY = date.today()
 
@@ -120,34 +130,235 @@ def determine_bar(season, is_weekend, occ):
             else: return "BAR8"
 
 
+# =============================================================================
+# 3-NEW. 희소성 프리미엄 + 전체 날짜 가격 통합 산출 (역전방지 + 연동 포함)
+# =============================================================================
+_price_cache = {}  # 리런 단위 캐시 (모듈 레벨, 리런마다 초기화됨)
+
+
+def compute_scarcity_premium(avail, date_obj):
+    """희소성 프리미엄: 잔여2실 +20,000 / 잔여1실 +50,000 / 체크인7일이내 잔여1실 +70,000"""
+    try:
+        avail_int = int(float(avail)) if pd.notna(avail) else 999
+    except Exception:
+        avail_int = 999
+    days_to_checkin = (date_obj - TODAY).days
+    if avail_int <= 1:
+        return 70000 if days_to_checkin <= 7 else 50000
+    elif avail_int <= 2:
+        return 20000
+    return 0
+
+
+def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
+    """주어진 날짜의 전체 객실 가격 통합 산출.
+    Step1: 전체 호텔OCC → hotel_bar
+    Step2~3: 메인5객실 BAR+가격
+    Step4: 역전방지 (HDT<HDP<FDB<FDE<HDF)
+    Step5~6: 특수객실 연동+희소성 프리미엄
+    Returns: {rid: {'occ', 'bar', 'price', 'is_manual'}}
+    """
+    if manual_bars is None:
+        manual_bars = {}
+
+    date_str = date_obj.strftime('%Y-%m-%d')
+    cache_key = (date_str, id(curr_df), tuple(sorted(manual_bars.items())))
+    if cache_key in _price_cache:
+        return _price_cache[cache_key]
+
+    type_code, season, is_weekend = get_season_details(date_obj)
+    date_rows = curr_df[curr_df['Date'] == date_obj]
+
+    # Step 1. 전체 호텔 OCC
+    total_avail_sum, total_rooms_sum = 0.0, 0.0
+    for _, row in date_rows.iterrows():
+        try:
+            total_avail_sum += float(row['Available']) if pd.notna(row['Available']) else 0.0
+            total_rooms_sum += float(row['Total']) if pd.notna(row['Total']) else 0.0
+        except Exception:
+            pass
+    hotel_occ = ((total_rooms_sum - total_avail_sum) / total_rooms_sum * 100) if total_rooms_sum > 0 else 0
+    hotel_bar = determine_bar(season, is_weekend, hotel_occ)
+
+    result = {}
+
+    # Step 2~3. 메인 5개 객실 BAR + 기본 가격
+    main_rooms_order = ["HDT", "HDP", "FDB", "FDE", "HDF"]
+    base_prices, bars, occs, is_manuals = {}, {}, {}, {}
+
+    for rid in main_rooms_order:
+        m = date_rows[date_rows['RoomID'] == rid]
+        if m.empty:
+            continue
+        try:
+            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
+        except Exception:
+            av = 0.0
+        tot = m.iloc[0]['Total']
+        occ = ((tot - av) / tot * 100) if tot > 0 else 0
+        occs[rid] = occ
+
+        manual_bar = manual_bars.get(f"{date_str}_{rid}")
+        if manual_bar:
+            bar, is_manual = manual_bar, True
+        else:
+            bar, is_manual = determine_bar(season, is_weekend, occ), False
+
+        bars[rid] = bar
+        is_manuals[rid] = is_manual
+        base_prices[rid] = PRICE_TABLE.get(rid, {}).get(bar, 0)
+
+    # Step 4. 가격 역전 방지
+    fp = dict(base_prices)
+    if "HDT" in fp and "HDP" in fp:
+        fp["HDP"] = max(fp["HDP"], fp["HDT"] + 30000)
+    if "HDP" in fp and "FDB" in fp:
+        fp["FDB"] = max(fp["FDB"], fp["HDP"] + 35000)
+    if "FDB" in fp and "FDE" in fp:
+        fp["FDE"] = max(fp["FDE"], fp["FDB"] + 37000)
+    if "FDE" in fp and "HDF" in fp:
+        fp["HDF"] = max(fp["HDF"], fp["FDE"] + 70000)
+
+    for rid in main_rooms_order:
+        if rid not in fp:
+            continue
+        occ_bar = bars.get(rid, "BAR8")
+        adj_price = fp[rid]
+        # 역전방지로 가격 상향된 경우 유효 BAR 역산
+        if adj_price != base_prices.get(rid, adj_price):
+            eff_bar = price_to_effective_bar(rid, adj_price) or occ_bar
+        else:
+            eff_bar = occ_bar
+        result[rid] = {
+            'occ': occs.get(rid, 0),
+            'bar': eff_bar,
+            'original_bar': occ_bar,
+            'price': adj_price,
+            'is_manual': is_manuals.get(rid, False),
+        }
+
+    # Step 5~6. 특수 객실
+    hdt_p = fp.get("HDT", 0)
+    fdb_p = fp.get("FDB", 0)
+    fde_p = fp.get("FDE", 0)
+    hdt_bar = bars.get("HDT", hotel_bar)
+    fde_bar = bars.get("FDE", hotel_bar)
+
+    for rid, compute_fn in [
+        ("GDB", lambda av: min(hdt_p + 15000, fdb_p - 20000) if fdb_p > 0 else hdt_p + 15000),
+        ("GDF", lambda av: min(fde_p + 40000, 802000)),
+        ("FFD", lambda av: fde_p + 20000),
+    ]:
+        m = date_rows[date_rows['RoomID'] == rid]
+        if m.empty:
+            continue
+        try:
+            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
+        except Exception:
+            av = 0.0
+        tot = m.iloc[0]['Total']
+        occ = ((tot - av) / tot * 100) if tot > 0 else 0
+        base_p = compute_fn(av)
+        scarcity = compute_scarcity_premium(av, date_obj)
+        final_p = base_p + scarcity
+        if rid == "GDB" and fdb_p > 0:
+            final_p = min(final_p, fdb_p - 20000)
+        elif rid == "GDF":
+            final_p = min(final_p, 802000)
+        ref_bar = hdt_bar if rid == "GDB" else fde_bar
+        result[rid] = {'occ': occ, 'bar': ref_bar, 'original_bar': ref_bar, 'price': final_p, 'is_manual': False}
+
+    for rid, table, cap in [("FPT", FPT_TABLE, 900000), ("PPV", PPV_TABLE, 2490000)]:
+        m = date_rows[date_rows['RoomID'] == rid]
+        if m.empty:
+            continue
+        try:
+            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
+        except Exception:
+            av = 0.0
+        tot = m.iloc[0]['Total']
+        occ = ((tot - av) / tot * 100) if tot > 0 else 0
+        base_p = table.get(hotel_bar, list(table.values())[-1])
+        scarcity = compute_scarcity_premium(av, date_obj)
+        final_p = min(base_p + scarcity, cap)
+        result[rid] = {'occ': occ, 'bar': hotel_bar, 'original_bar': hotel_bar, 'price': final_p, 'is_manual': False}
+
+    _price_cache[cache_key] = result
+    return result
+
+
+
+def price_to_effective_bar(room_id, price):
+    """조정된 가격에서 가장 가까운 실효 BAR 코드를 역산.
+    price 이하인 BAR 중 가장 높은 가격의 BAR 반환 (BAR0 제외).
+    예) HDF 749,000 → BAR2(747,000)"""
+    if room_id in DYNAMIC_ROOMS:
+        table = PRICE_TABLE.get(room_id, {})
+    elif room_id == "FPT":
+        table = FPT_TABLE
+    elif room_id == "PPV":
+        table = PPV_TABLE
+    else:
+        return None
+    best_bar, best_price = None, None
+    for i in range(1, 9):
+        bar = f"BAR{i}"
+        p = table.get(bar)
+        if p is None:
+            continue
+        if p <= price:
+            if best_price is None or p > best_price:
+                best_price, best_bar = p, bar
+    return best_bar
+
+
 def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
+    # --- 통합 산출 경로 (session_state에 today_df 있을 때) ---
+    try:
+        curr_df = st.session_state.get('today_df', pd.DataFrame())
+        if not curr_df.empty:
+            manual_bars = dict(st.session_state.get('manual_bars', {}))
+            if manual_bar:
+                manual_bars[f"{date_obj.strftime('%Y-%m-%d')}_{room_id}"] = manual_bar
+            all_prices = compute_all_prices_for_date(date_obj, curr_df, manual_bars)
+            if room_id in all_prices:
+                info = all_prices[room_id]
+                return info['occ'], info['bar'], info['price'], info.get('is_manual', False)
+    except Exception:
+        pass
+
+    # --- Fallback ---
     type_code, season, is_weekend = get_season_details(date_obj)
     try:
         current_avail = float(avail) if pd.notna(avail) else 0.0
-    except:
+    except Exception:
         current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
 
     if manual_bar:
         bar = manual_bar
-        if bar == "BAR0":
-            if room_id in DYNAMIC_ROOMS:
-                price = PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
-            else:
-                price = FIXED_BAR0_TABLE.get(room_id, 0)
+        if room_id in DYNAMIC_ROOMS:
+            price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
+        elif room_id == "FPT":
+            price = FPT_TABLE.get(bar, 0)
+        elif room_id == "PPV":
+            price = PPV_TABLE.get(bar, 0)
         else:
-            if room_id in DYNAMIC_ROOMS:
-                price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-            else:
-                price = FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+            price = 0
         return occ, bar, price, True
 
     if room_id in DYNAMIC_ROOMS:
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
+    elif room_id == "FPT":
+        bar = determine_bar(season, is_weekend, occ)
+        price = FPT_TABLE.get(bar, 500000)
+    elif room_id == "PPV":
+        bar = determine_bar(season, is_weekend, occ)
+        price = PPV_TABLE.get(bar, 1290000)
     else:
         bar = type_code
-        price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
+        price = 0
     return occ, bar, price, False
 
 
@@ -281,19 +492,18 @@ def validate_price_tables():
         if bar0 is not None and bar1 is not None and bar0 <= bar1:
             warnings.append(f"🚨 {room}: BAR0({bar0:,}) ≤ BAR1({bar1:,}) — 수동인상가가 BAR1보다 작거나 같음!")
 
-    # FIXED_PRICE_TABLE: UND1 ≤ UND2 ≤ MID1 ≤ MID2 ≤ UPP1 ≤ UPP2 순서 확인
-    order = ["UND1", "UND2", "MID1", "MID2", "UPP1", "UPP2"]
-    for room, prices in FIXED_PRICE_TABLE.items():
-        prev_p = None
-        prev_t = None
-        for t in order:
-            p = prices.get(t)
+    # FPT_TABLE / PPV_TABLE: BAR1>BAR2>...>BAR8 단조 감소 확인
+    for tname, tbl in [("FPT_TABLE", FPT_TABLE), ("PPV_TABLE", PPV_TABLE)]:
+        prev_price, prev_bar = None, None
+        for i in range(1, 9):
+            bar = f"BAR{i}"
+            p = tbl.get(bar)
             if p is None:
+                warnings.append(f"⚠️ {tname}: {bar} 가격 누락")
                 continue
-            if prev_p is not None and p < prev_p:
-                warnings.append(f"⚠️ {room}: {prev_t}({prev_p:,}) > {t}({p:,}) — 시즌 가격 역전")
-            prev_p = p
-            prev_t = t
+            if prev_price is not None and p >= prev_price:
+                warnings.append(f"🚨 {tname}: {prev_bar}({prev_price:,}) ≤ {bar}({p:,}) — 가격 역전!")
+            prev_price, prev_bar = p, bar
     return warnings
 
 
@@ -383,7 +593,18 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             if mode == "기준":
                 bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
                 style += f"background-color: {bg};"
-                content = f"<b>{bar}</b><br>{base_price:,}<br>{occ:.0f}%"
+                try:
+                    _ap = compute_all_prices_for_date(d, current_df, st.session_state.get('manual_bars', {}))
+                    _orig = _ap.get(rid, {}).get('original_bar', bar)
+                except Exception:
+                    _orig = bar
+                if _orig and _orig != bar:
+                    bar_disp = (f"<span style='color:#bbb;text-decoration:line-through;"
+                                f"font-size:9px;'>{_orig}</span>"
+                                f"<span style='color:#c62828;'>▲</span><b>{bar}</b>")
+                else:
+                    bar_disp = f"<b>{bar}</b>"
+                content = f"{bar_disp}<br>{base_price:,}<br>{occ:.0f}%"
 
             elif mode == "최종결과":
                 applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
@@ -396,16 +617,27 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 if is_applied and applied_rates and rid in DYNAMIC_ROOMS:
                     needs_review, _, _ = is_review_needed(rid, d, current_df, applied_rates)
 
+                try:
+                    _ap2 = compute_all_prices_for_date(d, current_df, st.session_state.get('manual_bars', {}))
+                    _orig2 = _ap2.get(rid, {}).get('original_bar', final_bar)
+                except Exception:
+                    _orig2 = final_bar
+                if _orig2 and _orig2 != final_bar and not is_applied:
+                    _bar_disp2 = (f"<span style='color:#bbb;text-decoration:line-through;"
+                                  f"font-size:9px;'>{_orig2}</span>"
+                                  f"<span style='color:#c62828;'>▲</span><b>{final_bar}</b>")
+                else:
+                    _bar_disp2 = f"<b>{final_bar}</b>"
                 if is_applied:
                     if needs_review:
                         style += f"background-color: {bg}; border: 3px solid #FF6F00; font-weight: bold; box-shadow: inset 0 0 0 2px #FFD54F;"
-                        content = f"⚠️ <b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
+                        content = f"⚠️ {_bar_disp2}<br>{final_price:,}<br>{occ:.0f}%"
                     else:
                         style += f"background-color: {bg}; border: 3px solid #2E7D32; font-weight: bold;"
-                        content = f"⭐ <b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
+                        content = f"⭐ {_bar_disp2}<br>{final_price:,}<br>{occ:.0f}%"
                 else:
                     style += f"background-color: {bg}; opacity: 0.9;"
-                    content = f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
+                    content = f"{_bar_disp2}<br>{final_price:,}<br>{occ:.0f}%"
 
             elif mode == "변화":
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
@@ -527,13 +759,14 @@ def get_applied_bar(target_date_str, room_id, applied_rates):
 
 
 def get_bar_price(room_id, bar):
-    if bar == "BAR0":
-        if room_id in DYNAMIC_ROOMS:
-            return PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
-        return FIXED_BAR0_TABLE.get(room_id, 0)
+    """BAR 코드로 가격 조회. GDB/GDF/FFD는 연동 산출이므로 0 반환 (applied_bar 없음)."""
     if room_id in DYNAMIC_ROOMS:
         return PRICE_TABLE.get(room_id, {}).get(bar, 0)
-    return FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
+    if room_id == "FPT":
+        return FPT_TABLE.get(bar, 0)
+    if room_id == "PPV":
+        return PPV_TABLE.get(bar, 0)
+    return 0
 
 # =============================================================================
 # 4-A-1-B. 예외 자동 갱신 (신규)
