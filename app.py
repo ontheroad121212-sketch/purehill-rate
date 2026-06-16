@@ -591,7 +591,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="ê¸°ì¤
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
 
             if mode == "ê¸°ì¤€":
-                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#F1F1F1"
+                bg = BAR_GRADIENT_COLORS.get(bar, "#FFFFFF")
                 style += f"background-color: {bg};"
                 try:
                     _ap = compute_all_prices_for_date(d, current_df, st.session_state.get('manual_bars', {}))
@@ -611,7 +611,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="ê¸°ì¤
                 is_applied = applied_bar is not None
                 final_bar = applied_bar if is_applied else bar
                 final_price = get_bar_price(rid, final_bar) if is_applied else base_price
-                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
+                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF")
 
                 needs_review = False
                 if is_applied and applied_rates and rid in DYNAMIC_ROOMS:
@@ -643,7 +643,7 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="ê¸°ì¤
                 curr_av_safe = float(avail) if pd.notna(avail) else 0.0
                 prev_av_safe = float(prev_avail) if (prev_avail is not None and pd.notna(prev_avail)) else 0.0
                 pickup = (prev_av_safe - curr_av_safe) if prev_avail is not None else 0
-                bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or bar == "BAR0" else "#FFFFFF"
+                bg = BAR_LIGHT_COLORS.get(bar, "#FFFFFF")
                 style += f"background-color: {bg};"
                 if pickup > 0:
                     style += "color:red; font-weight:bold; border: 1.5px solid red;"
@@ -1865,7 +1865,7 @@ def render_tomorrow_preview(current_df, applied_rates):
                     final_price = rec_price
                     star = ""
                     color = "#333"
-                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFF") if rid in DYNAMIC_ROOMS else "#F5F5F5"
+                bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFF")
                 rows_html += f"<tr><td style='padding:3px; border-bottom:1px solid #EEE;'><b>{rid}</b></td>"
                 rows_html += f"<td style='padding:3px; border-bottom:1px solid #EEE; text-align:center; background:{bg};'>{final_bar}</td>"
                 rows_html += f"<td style='padding:3px; border-bottom:1px solid #EEE; text-align:right; color:{color};'>{star}{final_price:,}</td></tr>"
@@ -2010,7 +2010,7 @@ def render_mobile_card_view(current_df, applied_rates):
                 badge_bg = "#E8F5E9"
                 badge_color = "#2E7D32"
 
-            bg_bar = BAR_GRADIENT_COLORS.get(final_bar, "#F5F5F5") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#ECEFF1"
+            bg_bar = BAR_GRADIENT_COLORS.get(final_bar, "#F5F5F5")
 
             try:
                 avail_int = int(float(avail)) if pd.notna(avail) else 0
