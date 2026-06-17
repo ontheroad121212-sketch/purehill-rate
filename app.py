@@ -687,7 +687,8 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     border_color = "#B71C1C" if is_price_up else "#0D47A1"
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
                     style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid {border_color};"
-                    content = f"{arrow} {prev_b_str}→{curr_b_str}"
+                    content = (f"{arrow} <b style='font-size:13px;'>{curr_b_str}</b><br>"
+                               f"<span style='font-size:9px;opacity:0.7;'>{prev_b_str}</span>")
                 else:
                     content = f"<span style='color:#aaa; font-size:10px;'>{curr_b_str}</span>"
 
