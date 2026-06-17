@@ -1110,12 +1110,12 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
         focus_dates = normalized_focus
 
     dates = sorted(current_df['Date'].unique())
-    rooms_to_show = room_filter if room_filter else DYNAMIC_ROOMS
+    rooms_to_show = room_filter if room_filter else ALL_ROOMS
 
-    # 재검토 필요 카운트
+    # 재검토 필요 카운트 (DYNAMIC_ROOMS만 오버라이드 대상)
     review_map = build_review_map(current_df, applied_rates)
     review_count = sum(1 for (rid, _), info in review_map.items()
-                       if info['needs'] and rid in rooms_to_show)
+                       if info['needs'] and rid in rooms_to_show and rid in DYNAMIC_ROOMS)
 
     review_banner = ""
     if review_count > 0:
@@ -1147,9 +1147,9 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
     html += "</tr></thead><tbody>"
 
     for rid in rooms_to_show:
-        if rid not in DYNAMIC_ROOMS:
-            continue  # 비교 대상은 DYNAMIC만
-        html += f"<tr><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'><b>{rid}</b></td>"
+        is_fixed = rid in FIXED_ROOMS
+        row_label = f"<b>{rid}</b>" + (" <span style='font-size:9px;color:#999;'>연동</span>" if is_fixed else "")
+        html += f"<tr><td style='border:1px solid #ddd; padding:8px; background:#fff; border-right:4px solid #000; position:sticky; left:0; z-index:1;'>{row_label}</td>"
 
         for d in dates:
             date_str = d.strftime('%Y-%m-%d')
@@ -1158,22 +1158,47 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 html += "<td style='border:1px solid #ddd; padding:8px; text-align:center;'>-</td>"
                 continue
 
-            d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
-            if use_focus and d_key not in focus_dates:
-                avail_o = curr_match.iloc[0]['Available']
-                total_o = curr_match.iloc[0]['Total']
-                _, rec_bar_o, _, _ = get_final_values(rid, d, avail_o, total_o)
-                applied_bar_o = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
-                bar_show = applied_bar_o if applied_bar_o else rec_bar_o
-                style = "border:1px solid #eee; padding:8px; text-align:center; background-color: #FAFAFA; color: #BBB;"
-                content = f"<span style='font-size:9px;'>포커스외</span><br><span style='font-size:10px;'>{bar_show}</span>"
-                html += f"<td style='{style}' title='5번 선택 외 날짜'>{content}</td>"
-                continue
-
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
-            _, rec_bar, _, _ = get_final_values(rid, d, avail, total)
+            _, rec_bar, rec_price, _ = get_final_values(rid, d, avail, total)
 
+            d_key = d.date() if (hasattr(d, 'date') and callable(getattr(d, 'date', None))) else d
+            if use_focus and d_key not in focus_dates:
+                applied_bar_o = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+                bar_show = applied_bar_o if applied_bar_o else rec_bar
+                style = "border:1px solid #eee; padding:8px; text-align:center; background-color: #FAFAFA; color: #BBB;"
+                cell_content = f"<span style='font-size:9px;'>포커스외</span><br><span style='font-size:10px;'>{bar_show}</span>"
+                html += f"<td style='{style}' title='5번 선택 외 날짜'>{cell_content}</td>"
+                continue
+
+            # ── 연동 객실 (GDB/GDF/FFD/FPT/PPV): 읽기전용 표시 ──
+            if is_fixed:
+                prev_rec_bar_f = None
+                if prev_df is not None and not prev_df.empty:
+                    prev_m_f = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
+                    if not prev_m_f.empty:
+                        _, prev_rec_bar_f, _, _ = get_final_values(rid, d, prev_m_f.iloc[0]['Available'], prev_m_f.iloc[0]['Total'])
+                is_trend_f = (prev_rec_bar_f is not None and
+                              str(prev_rec_bar_f).strip() != str(rec_bar).strip())
+                bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
+                if is_trend_f:
+                    style = (f"border:1.5px solid #2E7D32; padding:8px; text-align:center;"
+                             f"background-color: {bg_f}; font-weight:bold;")
+                    cell_content = (f"▲ <b>{rec_bar}</b><br>"
+                                    f"<span style='font-size:9px;color:#1B5E20;'>{rec_price:,}</span>")
+                    tooltip_f = f"title='이전 {prev_rec_bar_f} → 현재 {rec_bar}'"
+                elif highlight_only_changes:
+                    style = "border:1px solid #eee; padding:8px; text-align:center; background-color:#FAFAFA; color:#BBB;"
+                    cell_content = f"<span style='font-size:10px;'>{rec_bar}</span>"
+                    tooltip_f = ""
+                else:
+                    style = f"border:1px solid #ddd; padding:8px; text-align:center; background-color:{bg_f};"
+                    cell_content = f"<b>{rec_bar}</b><br><span style='font-size:9px;'>{rec_price:,}</span>"
+                    tooltip_f = ""
+                html += f"<td style='{style}' {tooltip_f}>{cell_content}</td>"
+                continue
+
+            # ── 기존 DYNAMIC 객실: 오버라이드 비교 로직 ──
             applied_info = applied_rates.get(date_str, {})
             applied_bar = applied_info.get('rooms', {}).get(rid)
             memo = applied_info.get('memo', '')
@@ -1204,25 +1229,25 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
 
             if not applied_bar:
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FAFAFA; color: #999;"
-                content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
+                cell_content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
             elif needs_review:
                 style = "border:2px solid #FF6F00; padding:8px; text-align:center; background-color: #FFF3E0; color: #E65100; font-weight:bold;"
-                content = f"⚠️ <b>{applied_bar}</b><br><span style='font-size:9px; color:#FF6F00;'>권장→{rec_bar}</span>"
+                cell_content = f"⚠️ <b>{applied_bar}</b><br><span style='font-size:9px; color:#FF6F00;'>권장→{rec_bar}</span>"
             elif applied_bar == rec_bar:
                 if highlight_only_changes and is_calm:
                     style = "border:1px solid #eee; padding:8px; text-align:center; background-color: #FAFAFA; color: #BBB;"
-                    content = f"<span style='font-size:10px;'>✓ {applied_bar}</span>"
+                    cell_content = f"<span style='font-size:10px;'>✓ {applied_bar}</span>"
                 elif is_trend_changed:
                     style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
-                    content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>이전 {prev_rec_bar}</span>"
+                    cell_content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>이전 {prev_rec_bar}</span>"
                 else:
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
-                    content = f"✅ <b>{applied_bar}</b>"
+                    cell_content = f"✅ <b>{applied_bar}</b>"
             else:
                 style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FFF3E0; color: #C62828; border: 1.5px dashed #FF8F00;"
-                content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
+                cell_content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
 
-            html += f"<td style='{style}' {tooltip}>{content}</td>"
+            html += f"<td style='{style}' {tooltip}>{cell_content}</td>"
         html += "</tr>"
     html += "</tbody></table></div>"
     return html
@@ -2846,10 +2871,10 @@ if not st.session_state.today_df.empty:
             with tcol2:
                 room_filter_4 = st.multiselect(
                     "🔍 4번 표 객실 필터",
-                    options=DYNAMIC_ROOMS,
-                    default=DYNAMIC_ROOMS,
+                    options=ALL_ROOMS,
+                    default=ALL_ROOMS,
                     key="room_filter_4",
-                    help="비교표에 보고 싶은 객실만 선택"
+                    help="비교표에 보고 싶은 객실만 선택 (연동객실은 읽기전용)"
                 )
             with tcol3:
                 picked_now = st.session_state.get('_picked_dates', set())
