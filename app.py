@@ -2273,6 +2273,11 @@ if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame(
 if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
 if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
 if 'manual_bars' not in st.session_state: st.session_state.manual_bars = {}
+# 신규 5객실 추가 후 세션 캐시 리셋: room_filter_4가 FIXED_ROOMS를 포함하지 않으면 ALL_ROOMS로 재초기화
+if 'room_filter_4' in st.session_state:
+    cached = st.session_state.get('room_filter_4', [])
+    if not any(r in cached for r in FIXED_ROOMS):
+        del st.session_state['room_filter_4']
 
 # =============================================================================
 # 사이드바
