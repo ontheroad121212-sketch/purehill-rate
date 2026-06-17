@@ -586,7 +586,14 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 if not prev_m.empty:
                     prev_avail = prev_m.iloc[0]['Available']
                     p_m_bar = st.session_state.get('manual_bars', {}).get(override_key) if mode == "판매가" else None
-                    _, prev_bar, _, _ = get_final_values(rid, d, prev_avail, prev_m.iloc[0]['Total'], p_m_bar)
+                    try:
+                        _prev_manual = dict(st.session_state.get('manual_bars', {}))
+                        if p_m_bar:
+                            _prev_manual[f"{date_str}_{rid}"] = p_m_bar
+                        _prev_all = compute_all_prices_for_date(d, prev_df, _prev_manual)
+                        prev_bar = _prev_all.get(rid, {}).get('bar')
+                    except Exception:
+                        prev_bar = None
 
             style = f"border:1px solid #ddd; padding:{row_padding}; text-align:center; background-color:white; {line_style}"
 
@@ -1177,7 +1184,11 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 if prev_df is not None and not prev_df.empty:
                     prev_m_f = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                     if not prev_m_f.empty:
-                        _, prev_rec_bar_f, _, _ = get_final_values(rid, d, prev_m_f.iloc[0]['Available'], prev_m_f.iloc[0]['Total'])
+                        try:
+                            _pf_all = compute_all_prices_for_date(d, prev_df, dict(st.session_state.get('manual_bars', {})))
+                            prev_rec_bar_f = _pf_all.get(rid, {}).get('bar')
+                        except Exception:
+                            prev_rec_bar_f = None
                 is_trend_f = (prev_rec_bar_f is not None and
                               str(prev_rec_bar_f).strip() != str(rec_bar).strip())
                 bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
@@ -1211,7 +1222,11 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
-                    _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
+                    try:
+                        _pd_all = compute_all_prices_for_date(d, prev_df, dict(st.session_state.get('manual_bars', {})))
+                        prev_rec_bar = _pd_all.get(rid, {}).get('bar')
+                    except Exception:
+                        prev_rec_bar = None
 
             is_trend_changed = (prev_rec_bar is not None and
                                 str(prev_rec_bar).strip() != str(rec_bar).strip())
@@ -1741,7 +1756,11 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
             if prev_df is not None and not prev_df.empty:
                 prev_m = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
                 if not prev_m.empty:
-                    _, prev_rec_bar, _, _ = get_final_values(rid, d, prev_m.iloc[0]['Available'], prev_m.iloc[0]['Total'])
+                    try:
+                        _pch_all = compute_all_prices_for_date(d, prev_df, dict(st.session_state.get('manual_bars', {})))
+                        prev_rec_bar = _pch_all.get(rid, {}).get('bar')
+                    except Exception:
+                        prev_rec_bar = None
 
             is_trend_changed = (prev_rec_bar is not None and
                                 str(prev_rec_bar).strip() != str(rec_bar).strip())
