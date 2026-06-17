@@ -1253,7 +1253,8 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                     bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
                     style = (f"border:1.5px solid {_fborder}; padding:8px; text-align:center;"
                              f"background-color: {bg_f}; font-weight:bold;")
-                    cell_content = (f"{_farrow} {prev_rec_bar_f}→{rec_bar}<br>"
+                    cell_content = (f"{_farrow} <b style='font-size:13px;'>{rec_bar}</b><br>"
+                                    f"<span style='font-size:9px;opacity:0.7;'>{prev_rec_bar_f}</span><br>"
                                     f"<span style='font-size:9px;'>{rec_price:,}</span>")
                     tooltip_f = f"title='이전 {prev_rec_bar_f} → 현재 {rec_bar}'"
                 elif highlight_only_changes:
@@ -1313,7 +1314,14 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                     cell_content = f"<span style='font-size:10px;'>✓ {applied_bar}</span>"
                 elif is_trend_changed:
                     style = "border:1.5px solid #2E7D32; padding:8px; text-align:center; background-color: #C8E6C9; color: #1B5E20; font-weight:bold;"
-                    cell_content = f"▲ <b>{applied_bar}</b><br><span style='font-size:9px;'>이전 {prev_rec_bar}</span>"
+                    try:
+                        _tn_p = int(str(prev_rec_bar).replace('BAR',''))
+                        _tn_c = int(str(applied_bar).replace('BAR',''))
+                        _t_arrow = "▲" if _tn_c < _tn_p else "▼"
+                    except Exception:
+                        _t_arrow = "▲"
+                    cell_content = (f"{_t_arrow} <b style='font-size:13px;'>{applied_bar}</b><br>"
+                                    f"<span style='font-size:9px;opacity:0.7;'>{prev_rec_bar}</span>")
                 else:
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
                     cell_content = f"✅ <b>{applied_bar}</b>"
