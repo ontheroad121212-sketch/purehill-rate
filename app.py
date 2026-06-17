@@ -52,6 +52,21 @@ PPV_TABLE = {
     "BAR0": 2490000, "BAR1": 2340000, "BAR2": 2190000, "BAR3": 2040000,
     "BAR4": 1890000, "BAR5": 1740000, "BAR6": 1590000, "BAR7": 1440000, "BAR8": 1290000,
 }
+# GDB 그린밸리 더블 독립 BAR 요금표 (자체 OCC 기준, 298,000~678,000)
+GDB_TABLE = {
+    "BAR0": 678000, "BAR1": 618000, "BAR2": 538000, "BAR3": 478000,
+    "BAR4": 418000, "BAR5": 358000, "BAR6": 298000, "BAR7": 298000, "BAR8": 298000,
+}
+# GDF 그린밸리 패밀리 독립 BAR 요금표 (자체 OCC 기준, 392,000~878,000)
+GDF_TABLE = {
+    "BAR0": 878000, "BAR1": 802000, "BAR2": 719000, "BAR3": 644000,
+    "BAR4": 579000, "BAR5": 522000, "BAR6": 473000, "BAR7": 430000, "BAR8": 392000,
+}
+# FFD 포레스트 패밀리 더블 BAR 요금표 (FDE+20k 플로어 스냅업, 372,000~859,000)
+FFD_TABLE = {
+    "BAR0": 859000, "BAR1": 785000, "BAR2": 699000, "BAR3": 624000,
+    "BAR4": 559000, "BAR5": 502000, "BAR6": 453000, "BAR7": 410000, "BAR8": 372000,
+}
 # 하위 호환용 (구 스냅샷 읽기 등에 사용될 수 있음, 신규 산출에는 미사용)
 FIXED_PRICE_TABLE = {
     "GDB": {"UND1": 298000, "UND2": 298000, "MID1": 298000, "MID2": 298000, "UPP1": 298000, "UPP2": 298000},
@@ -150,6 +165,24 @@ def compute_scarcity_premium(avail, date_obj):
     return 0
 
 
+def snap_to_bar_ceil(table, floor_price):
+    """floor_price 이상인 BAR 중 가장 저렴한(번호 높은) BAR 반환.
+    예) FFD floor=609,000 → BAR5(502,000)는 미달, BAR4(559,000)도 미달,
+        BAR3(624,000) ≥ 609,000 → 'BAR3'
+    모든 BAR가 floor 미만이면 'BAR0'(최고가) 반환."""
+    best_bar = "BAR0"
+    best_num = -1
+    for bar, price in table.items():
+        try:
+            num = int(bar.replace("BAR", ""))
+        except Exception:
+            continue
+        if price >= floor_price and num > best_num:
+            best_num = num
+            best_bar = bar
+    return best_bar
+
+
 def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
     """주어진 날짜의 전체 객실 가격 통합 산출.
     Step1: 전체 호텔OCC → hotel_bar
@@ -237,19 +270,10 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             'is_manual': is_manuals.get(rid, False),
         }
 
-    # Step 5~6. 특수 객실
-    hdt_p = fp.get("HDT", 0)
-    fdb_p = fp.get("FDB", 0)
+    # Step 5. GDB/GDF: 자체 OCC 기반 독립 BAR (그린밸리 펜션형, 메인 계층 무관)
     fde_p = fp.get("FDE", 0)
-    hdt_bar = bars.get("HDT", hotel_bar)
-    fde_bar = bars.get("FDE", hotel_bar)
 
-    for rid, compute_fn in [
-        # GDB 캡(fdb_p-20000): 역전방지로 FDB≥HDT+65k 항상 보장돼 실질 발동 없음. 안전망으로 유지.
-        ("GDB", lambda av: min(hdt_p + 15000, fdb_p - 20000) if fdb_p > 0 else hdt_p + 15000),
-        ("GDF", lambda av: min(fde_p + 40000, 802000)),
-        ("FFD", lambda av: fde_p + 20000),
-    ]:
+    for rid, table, cap in [("GDB", GDB_TABLE, 678000), ("GDF", GDF_TABLE, 878000)]:
         m = date_rows[date_rows['RoomID'] == rid]
         if m.empty:
             continue
@@ -259,16 +283,30 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             av = 0.0
         tot = m.iloc[0]['Total']
         occ = ((tot - av) / tot * 100) if tot > 0 else 0
-        base_p = compute_fn(av)
+        own_bar = determine_bar(season, is_weekend, occ)
+        base_p = table.get(own_bar, list(table.values())[-1])
         scarcity = compute_scarcity_premium(av, date_obj)
-        final_p = base_p + scarcity
-        if rid == "GDB" and fdb_p > 0:
-            final_p = min(final_p, fdb_p - 20000)
-        elif rid == "GDF":
-            final_p = min(final_p, 802000)
-        ref_bar = hdt_bar if rid == "GDB" else fde_bar
-        result[rid] = {'occ': occ, 'bar': ref_bar, 'original_bar': ref_bar, 'price': final_p, 'is_manual': False}
+        final_p = min(base_p + scarcity, cap)
+        eff_bar = price_to_effective_bar(rid, final_p) or own_bar
+        result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': own_bar, 'price': final_p, 'is_manual': False}
 
+    # Step 6. FFD: FDE+20k 플로어 기준 FFD_TABLE 스냅업 (FDE 연동)
+    m_ffd = date_rows[date_rows['RoomID'] == "FFD"]
+    if not m_ffd.empty:
+        try:
+            av_ffd = float(m_ffd.iloc[0]['Available']) if pd.notna(m_ffd.iloc[0]['Available']) else 0.0
+        except Exception:
+            av_ffd = 0.0
+        tot_ffd = m_ffd.iloc[0]['Total']
+        occ_ffd = ((tot_ffd - av_ffd) / tot_ffd * 100) if tot_ffd > 0 else 0
+        scarcity_ffd = compute_scarcity_premium(av_ffd, date_obj)
+        ffd_floor = fde_p + 20000 + scarcity_ffd
+        ffd_bar = snap_to_bar_ceil(FFD_TABLE, ffd_floor)
+        ffd_price = FFD_TABLE.get(ffd_bar, FFD_TABLE["BAR0"])
+        result["FFD"] = {'occ': occ_ffd, 'bar': ffd_bar, 'original_bar': ffd_bar, 'price': ffd_price, 'is_manual': False}
+
+    # Step 7. FPT/PPV: FDB BAR 연동 (FDB 오르면 같이 오름, 역전 없음)
+    fdb_bar = result.get("FDB", {}).get("bar", hotel_bar)
     for rid, table, cap in [("FPT", FPT_TABLE, 900000), ("PPV", PPV_TABLE, 2490000)]:
         m = date_rows[date_rows['RoomID'] == rid]
         if m.empty:
@@ -279,10 +317,10 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             av = 0.0
         tot = m.iloc[0]['Total']
         occ = ((tot - av) / tot * 100) if tot > 0 else 0
-        base_p = table.get(hotel_bar, list(table.values())[-1])
+        base_p = table.get(fdb_bar, list(table.values())[-1])
         scarcity = compute_scarcity_premium(av, date_obj)
         final_p = min(base_p + scarcity, cap)
-        result[rid] = {'occ': occ, 'bar': hotel_bar, 'original_bar': hotel_bar, 'price': final_p, 'is_manual': False}
+        result[rid] = {'occ': occ, 'bar': fdb_bar, 'original_bar': fdb_bar, 'price': final_p, 'is_manual': False}
 
     _price_cache[cache_key] = result
     return result
@@ -299,6 +337,12 @@ def price_to_effective_bar(room_id, price):
         table = FPT_TABLE
     elif room_id == "PPV":
         table = PPV_TABLE
+    elif room_id == "GDB":
+        table = GDB_TABLE
+    elif room_id == "GDF":
+        table = GDF_TABLE
+    elif room_id == "FFD":
+        table = FFD_TABLE
     else:
         return None
     best_bar, best_price = None, None
@@ -344,6 +388,12 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
             price = FPT_TABLE.get(bar, 0)
         elif room_id == "PPV":
             price = PPV_TABLE.get(bar, 0)
+        elif room_id == "GDB":
+            price = GDB_TABLE.get(bar, 0)
+        elif room_id == "GDF":
+            price = GDF_TABLE.get(bar, 0)
+        elif room_id == "FFD":
+            price = FFD_TABLE.get(bar, 0)
         else:
             price = 0
         return occ, bar, price, True
@@ -352,11 +402,22 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
         bar = determine_bar(season, is_weekend, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
     elif room_id == "FPT":
+        # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
         bar = determine_bar(season, is_weekend, occ)
         price = FPT_TABLE.get(bar, 500000)
     elif room_id == "PPV":
+        # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
         bar = determine_bar(season, is_weekend, occ)
         price = PPV_TABLE.get(bar, 1290000)
+    elif room_id == "GDB":
+        bar = determine_bar(season, is_weekend, occ)
+        price = GDB_TABLE.get(bar, 298000)
+    elif room_id == "GDF":
+        bar = determine_bar(season, is_weekend, occ)
+        price = GDF_TABLE.get(bar, 392000)
+    elif room_id == "FFD":
+        bar = determine_bar(season, is_weekend, occ)
+        price = FFD_TABLE.get(bar, 372000)
     else:
         bar = type_code
         price = 0
@@ -794,13 +855,19 @@ def get_applied_bar(target_date_str, room_id, applied_rates):
 
 
 def get_bar_price(room_id, bar):
-    """BAR 코드로 가격 조회. GDB/GDF/FFD는 연동 산출이므로 0 반환 (applied_bar 없음)."""
+    """BAR 코드로 가격 조회."""
     if room_id in DYNAMIC_ROOMS:
         return PRICE_TABLE.get(room_id, {}).get(bar, 0)
     if room_id == "FPT":
         return FPT_TABLE.get(bar, 0)
     if room_id == "PPV":
         return PPV_TABLE.get(bar, 0)
+    if room_id == "GDB":
+        return GDB_TABLE.get(bar, 0)
+    if room_id == "GDF":
+        return GDF_TABLE.get(bar, 0)
+    if room_id == "FFD":
+        return FFD_TABLE.get(bar, 0)
     return 0
 
 # =============================================================================
