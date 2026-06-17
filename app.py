@@ -245,6 +245,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
     fde_bar = bars.get("FDE", hotel_bar)
 
     for rid, compute_fn in [
+        # GDB 캡(fdb_p-20000): 역전방지로 FDB≥HDT+65k 항상 보장돼 실질 발동 없음. 안전망으로 유지.
         ("GDB", lambda av: min(hdt_p + 15000, fdb_p - 20000) if fdb_p > 0 else hdt_p + 15000),
         ("GDF", lambda av: min(fde_p + 40000, 802000)),
         ("FFD", lambda av: fde_p + 20000),
@@ -616,8 +617,18 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
             elif mode == "최종결과":
                 applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
                 is_applied = applied_bar is not None
-                final_bar = applied_bar if is_applied else bar
-                final_price = get_bar_price(rid, final_bar) if is_applied else base_price
+                # 가격 직접 오버라이드(GDB/GDF/FFD 숫자 문자열) vs BAR 오버라이드 구분
+                _is_price_ovr = is_applied and str(applied_bar).strip().isdigit()
+                if _is_price_ovr:
+                    final_bar = bar          # 색상은 계산 BAR 기준
+                    final_price = int(str(applied_bar).strip())
+                elif is_applied:
+                    final_bar = applied_bar
+                    final_price = get_bar_price(rid, final_bar) if final_price is None else base_price
+                    final_price = get_bar_price(rid, final_bar) or base_price
+                else:
+                    final_bar = bar
+                    final_price = base_price
                 bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF")
 
                 needs_review = False
@@ -629,7 +640,9 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                     _orig2 = _ap2.get(rid, {}).get('original_bar', final_bar)
                 except Exception:
                     _orig2 = final_bar
-                if _orig2 and _orig2 != final_bar and not is_applied:
+                if _is_price_ovr:
+                    _bar_disp2 = f"<b>직접가격</b>"
+                elif _orig2 and _orig2 != final_bar and not is_applied:
                     _bar_disp2 = (f"<span style='color:#bbb;text-decoration:line-through;"
                                   f"font-size:9px;'>{_orig2}</span>"
                                   f"<span style='color:#c62828;'>▲</span><b>{final_bar}</b>")
@@ -665,11 +678,19 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 if prev_bar is not None and prev_b_str != curr_b_str:
+                    try:
+                        prev_num = int(prev_b_str.replace('BAR', ''))
+                        curr_num = int(curr_b_str.replace('BAR', ''))
+                        is_price_up = curr_num < prev_num  # BAR 숫자 낮을수록 고가
+                    except Exception:
+                        is_price_up = True
+                    arrow = "▲" if is_price_up else "▼"
+                    border_color = "#B71C1C" if is_price_up else "#0D47A1"
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
-                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #000;"
-                    content = f"▲ {bar}"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid {border_color};"
+                    content = f"{arrow} {prev_b_str}→{curr_b_str}"
                 else:
-                    content = bar
+                    content = f"<span style='color:#aaa; font-size:10px;'>{curr_b_str}</span>"
 
             elif mode == "판매가":
                 try:
@@ -685,8 +706,15 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 curr_b_str = str(bar).strip() if bar else ""
                 prev_b_str = str(prev_bar).strip() if prev_bar else ""
                 if prev_bar is not None and prev_b_str != curr_b_str:
+                    try:
+                        _pn = int(prev_b_str.replace('BAR', ''))
+                        _cn = int(curr_b_str.replace('BAR', ''))
+                        _is_up = _cn < _pn
+                    except Exception:
+                        _is_up = True
+                    _bc = "#B71C1C" if _is_up else "#0D47A1"
                     bg = BAR_GRADIENT_COLORS.get(bar, "#7000FF")
-                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid #333;"
+                    style += f"background-color: {bg}; color: white; font-weight: bold; border: 2.5px solid {_bc};"
                 if is_manual:
                     style += "border: 2px dashed #FF0000;"
                     content = f"⭐ {content}"
@@ -1178,8 +1206,13 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                 html += f"<td style='{style}' title='5번 선택 외 날짜'>{cell_content}</td>"
                 continue
 
-            # ── 연동 객실 (GDB/GDF/FFD/FPT/PPV): 읽기전용 표시 ──
+            # ── 연동 객실 (GDB/GDF/FFD/FPT/PPV) ──
             if is_fixed:
+                # 오버라이드 확인
+                fixed_override = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
+                _fovr_is_price = fixed_override and str(fixed_override).strip().isdigit()
+                _fovr_is_bar = fixed_override and str(fixed_override).strip().upper().startswith('BAR')
+
                 prev_rec_bar_f = None
                 if prev_df is not None and not prev_df.empty:
                     prev_m_f = prev_df[(prev_df['RoomID'] == rid) & (prev_df['Date'] == d)]
@@ -1191,18 +1224,44 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                             prev_rec_bar_f = None
                 is_trend_f = (prev_rec_bar_f is not None and
                               str(prev_rec_bar_f).strip() != str(rec_bar).strip())
-                bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
-                if is_trend_f:
-                    style = (f"border:1.5px solid #2E7D32; padding:8px; text-align:center;"
+
+                if fixed_override:
+                    # 오버라이드 있음 — 초록 테두리로 표시
+                    bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
+                    style = (f"border:2px solid #2E7D32; padding:8px; text-align:center;"
+                             f"background-color:{bg_f}; font-weight:bold;")
+                    if _fovr_is_price:
+                        ovr_price = int(str(fixed_override).strip())
+                        cell_content = (f"⭐ <b>직접가격</b><br>"
+                                        f"<span style='font-size:9px;color:#1B5E20;'>{ovr_price:,}</span><br>"
+                                        f"<span style='font-size:8px;color:#555;'>권장:{rec_price:,}</span>")
+                    else:
+                        ovr_bar = str(fixed_override).strip().upper()
+                        ovr_price_f = get_bar_price(rid, ovr_bar) or rec_price
+                        cell_content = (f"⭐ <b>{ovr_bar}</b><br>"
+                                        f"<span style='font-size:9px;color:#1B5E20;'>{ovr_price_f:,}</span><br>"
+                                        f"<span style='font-size:8px;color:#555;'>권장:{rec_bar}</span>")
+                    tooltip_f = f"title='연동객실 수동오버라이드'"
+                elif is_trend_f:
+                    try:
+                        _pnum = int(str(prev_rec_bar_f).replace('BAR',''))
+                        _cnum = int(str(rec_bar).replace('BAR',''))
+                        _farrow = "▲" if _cnum < _pnum else "▼"
+                        _fborder = "#B71C1C" if _cnum < _pnum else "#0D47A1"
+                    except Exception:
+                        _farrow, _fborder = "▲", "#B71C1C"
+                    bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
+                    style = (f"border:1.5px solid {_fborder}; padding:8px; text-align:center;"
                              f"background-color: {bg_f}; font-weight:bold;")
-                    cell_content = (f"▲ <b>{rec_bar}</b><br>"
-                                    f"<span style='font-size:9px;color:#1B5E20;'>{rec_price:,}</span>")
+                    cell_content = (f"{_farrow} {prev_rec_bar_f}→{rec_bar}<br>"
+                                    f"<span style='font-size:9px;'>{rec_price:,}</span>")
                     tooltip_f = f"title='이전 {prev_rec_bar_f} → 현재 {rec_bar}'"
                 elif highlight_only_changes:
                     style = "border:1px solid #eee; padding:8px; text-align:center; background-color:#FAFAFA; color:#BBB;"
                     cell_content = f"<span style='font-size:10px;'>{rec_bar}</span>"
                     tooltip_f = ""
                 else:
+                    bg_f = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
                     style = f"border:1px solid #ddd; padding:8px; text-align:center; background-color:{bg_f};"
                     cell_content = f"<b>{rec_bar}</b><br><span style='font-size:9px;'>{rec_price:,}</span>"
                     tooltip_f = ""
@@ -1259,8 +1318,25 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                     style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #E8F5E9; color: #2E7D32;"
                     cell_content = f"✅ <b>{applied_bar}</b>"
             else:
-                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FFF3E0; color: #C62828; border: 1.5px dashed #FF8F00;"
-                cell_content = f"<span style='font-size:10px;text-decoration:line-through;color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>"
+                # 오버라이드 방향 구분: 고가유지(파랑) vs 저가오버라이드(주황)
+                try:
+                    _app_n = int(applied_bar.replace('BAR', ''))
+                    _rec_n = int(rec_bar.replace('BAR', ''))
+                    _keeping_high = _app_n < _rec_n  # 낮은 BAR 번호 = 높은 가격
+                except Exception:
+                    _keeping_high = False
+                if _keeping_high:
+                    style = ("border:1.5px solid #1565C0; padding:8px; text-align:center; "
+                             "background-color:#E3F2FD; color:#0D47A1; font-weight:bold;")
+                    cell_content = (f"<span style='font-size:9px;color:#90CAF9;"
+                                    f"text-decoration:line-through;'>{rec_bar}</span><br>"
+                                    f"🏷️ <b>{applied_bar}</b><br>"
+                                    f"<span style='font-size:8px;color:#1565C0;'>고가유지</span>")
+                else:
+                    style = ("border:1.5px dashed #FF8F00; padding:8px; text-align:center; "
+                             "background-color:#FFF3E0; color:#C62828;")
+                    cell_content = (f"<span style='font-size:10px;text-decoration:line-through;"
+                                    f"color:#999;'>{rec_bar}</span><br>⭐ <b>{applied_bar}</b>")
 
             html += f"<td style='{style}' {tooltip}>{cell_content}</td>"
         html += "</tr>"
@@ -1590,6 +1666,95 @@ def render_apply_rate_ui(current_df, applied_rates):
             if bar_val and bar_val in bar_options:
                 if d not in applied_input: applied_input[d] = {}
                 applied_input[d][rid] = bar_val
+
+    # ── 연동 객실 수동 오버라이드 ──────────────────────────────────────────
+    st.markdown("---")
+    with st.expander("🔗 연동 객실 수동 오버라이드 (선택적)", expanded=False):
+        st.caption(
+            "GDB/GDF/FFD: 직접 가격(원) 입력. FPT/PPV: BAR 선택. "
+            "비워두면 연동 산식 그대로. 저장 버튼은 아래 공통 버튼 사용."
+        )
+
+        price_rooms_fixed = ["GDB", "GDF", "FFD"]
+        bar_rooms_fixed   = ["FPT", "PPV"]
+        bar_options_with_empty = [""] + bar_options
+        fixed_price_key = f"fxprice_{len(selected_dates)}_{safe_date_str}"
+        fixed_bar_key   = f"fxbar_{len(selected_dates)}_{safe_date_str}"
+
+        def _build_price_matrix():
+            rows = []
+            for rid in price_rooms_fixed:
+                row = {"객실": rid}
+                for d in selected_dates:
+                    lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                    existing = applied_rates.get(d.strftime('%Y-%m-%d'), {}).get('rooms', {}).get(rid)
+                    row[lbl] = int(existing) if existing and str(existing).isdigit() else None
+                rows.append(row)
+            return rows
+
+        def _build_bar_matrix():
+            rows = []
+            for rid in bar_rooms_fixed:
+                row = {"객실": rid}
+                for d in selected_dates:
+                    lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                    existing = applied_rates.get(d.strftime('%Y-%m-%d'), {}).get('rooms', {}).get(rid)
+                    row[lbl] = existing if existing in bar_options else ""
+                rows.append(row)
+            return rows
+
+        if fixed_price_key not in st.session_state:
+            st.session_state[fixed_price_key] = _build_price_matrix()
+        if fixed_bar_key not in st.session_state:
+            st.session_state[fixed_bar_key] = _build_bar_matrix()
+
+        st.markdown("**GDB / GDF / FFD — 직접 가격 (원)**")
+        pcfg = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
+        for d in selected_dates:
+            lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+            pcfg[lbl] = st.column_config.NumberColumn(min_value=0, max_value=3000000, step=1000, width="small", format="%d원")
+        edited_price_fx = st.data_editor(
+            pd.DataFrame(st.session_state[fixed_price_key]),
+            column_config=pcfg, use_container_width=True, hide_index=True,
+            key="fx_price_editor"
+        )
+
+        st.markdown("**FPT / PPV — BAR 선택**")
+        bcfg = {"객실": st.column_config.TextColumn(disabled=True, width="small")}
+        for d in selected_dates:
+            lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+            bcfg[lbl] = st.column_config.SelectboxColumn(options=bar_options_with_empty, required=False, width="small")
+        edited_bar_fx = st.data_editor(
+            pd.DataFrame(st.session_state[fixed_bar_key]),
+            column_config=bcfg, use_container_width=True, hide_index=True,
+            key="fx_bar_editor"
+        )
+
+        # 파싱 → applied_input에 병합
+        for _, row in edited_price_fx.iterrows():
+            rid = row["객실"]
+            for d in selected_dates:
+                lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                val = row.get(lbl)
+                if val is not None and pd.notna(val):
+                    try:
+                        pval = int(float(val))
+                        if pval > 0:
+                            if d not in applied_input: applied_input[d] = {}
+                            applied_input[d][rid] = str(pval)
+                    except Exception:
+                        pass
+
+        for _, row in edited_bar_fx.iterrows():
+            rid = row["객실"]
+            for d in selected_dates:
+                lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
+                val = row.get(lbl)
+                bval = str(val).strip().upper() if val and pd.notna(val) else ""
+                if bval in bar_options:
+                    if d not in applied_input: applied_input[d] = {}
+                    applied_input[d][rid] = bval
+    # ────────────────────────────────────────────────────────────────────────
 
     memo = st.text_area("📝 메모 (툴팁 표시용)", placeholder="예: 총지배인 지시로 유지 / 단체예약 있어서 조정 안함", key="apply_memo", height=70)
 
