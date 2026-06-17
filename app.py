@@ -624,7 +624,6 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="ê¸°ì¤
                     final_price = int(str(applied_bar).strip())
                 elif is_applied:
                     final_bar = applied_bar
-                    final_price = get_bar_price(rid, final_bar) if final_price is None else base_price
                     final_price = get_bar_price(rid, final_bar) or base_price
                 else:
                     final_bar = bar
