@@ -21,50 +21,54 @@ db = firestore.client()
 
 # --- 2. 전역 설정 데이터 ---
 BAR_GRADIENT_COLORS = {
+    "BAR0P": "#7B0000",  # BAR0보다 진한 최고가
     "BAR0": "#B71C1C",
     "BAR1": "#D32F2F", "BAR2": "#EF5350", "BAR3": "#FF8A65", "BAR4": "#FFB199",
     "BAR5": "#81C784", "BAR6": "#A5D6A7", "BAR7": "#C8E6C9", "BAR8": "#E8F5E9",
 }
 BAR_LIGHT_COLORS = {
+    "BAR0P": "#EF9A9A",
     "BAR0": "#FFCDD2",
     "BAR1": "#FFEBEE", "BAR2": "#FFEBEE", "BAR3": "#FFF3E0", "BAR4": "#FFF3E0",
     "BAR5": "#E8F5E9", "BAR6": "#E8F5E9", "BAR7": "#F1F8E9", "BAR8": "#F1F8E9",
 }
+# BAR 고가→저가 순서 (인덱스 낮을수록 비쌈)
+BAR_ORDER = ["BAR0P", "BAR0", "BAR1", "BAR2", "BAR3", "BAR4", "BAR5", "BAR6", "BAR7", "BAR8"]
 WEEKDAYS_KR = ['월', '화', '수', '목', '금', '토', '일']
 DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
 FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
 ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
 
 PRICE_TABLE = {
-    "FDB": {"BAR0": 802000, "BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
-    "FDE": {"BAR0": 839000, "BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
-    "HDP": {"BAR0": 759000, "BAR8": 280000, "BAR7": 318000, "BAR6": 361000, "BAR5": 410000, "BAR4": 467000, "BAR3": 532000, "BAR2": 607000, "BAR1": 693000},
-    "HDT": {"BAR0": 729000, "BAR8": 250000, "BAR7": 288000, "BAR6": 331000, "BAR5": 380000, "BAR4": 437000, "BAR3": 502000, "BAR2": 577000, "BAR1": 663000},
-    "HDF": {"BAR0": 916000, "BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
+    "FDB": {"BAR0P": 894000, "BAR0": 805000, "BAR1": 721000, "BAR2": 642000, "BAR3": 567000, "BAR4": 502000, "BAR5": 445000, "BAR6": 396000, "BAR7": 353000, "BAR8": 315000},
+    "FDE": {"BAR0P": 931000, "BAR0": 842000, "BAR1": 758000, "BAR2": 679000, "BAR3": 604000, "BAR4": 539000, "BAR5": 482000, "BAR6": 433000, "BAR7": 390000, "BAR8": 352000},
+    "HDP": {"BAR0P": 859000, "BAR0": 770000, "BAR1": 686000, "BAR2": 607000, "BAR3": 532000, "BAR4": 467000, "BAR5": 410000, "BAR6": 361000, "BAR7": 318000, "BAR8": 280000},
+    "HDT": {"BAR0P": 829000, "BAR0": 740000, "BAR1": 656000, "BAR2": 577000, "BAR3": 502000, "BAR4": 437000, "BAR5": 380000, "BAR6": 331000, "BAR7": 288000, "BAR8": 250000},
+    "HDF": {"BAR0P": 999000, "BAR0": 910000, "BAR1": 826000, "BAR2": 747000, "BAR3": 672000, "BAR4": 607000, "BAR5": 550000, "BAR6": 501000, "BAR7": 458000, "BAR8": 420000},
 }
 # FPT 펫룸 독립 BAR 요금표 (호텔 전체 OCC 기준, 500,000~900,000)
 FPT_TABLE = {
-    "BAR0": 900000, "BAR1": 850000, "BAR2": 800000, "BAR3": 750000,
+    "BAR0P": 950000, "BAR0": 900000, "BAR1": 850000, "BAR2": 800000, "BAR3": 750000,
     "BAR4": 700000, "BAR5": 650000, "BAR6": 600000, "BAR7": 550000, "BAR8": 500000,
 }
-# PPV 풀빌라 럭셔리 독립 BAR 요금표 (호텔 전체 OCC 기준, 1,290,000~2,490,000)
+# PPV 풀빌라 럭셔리 독립 BAR 요금표 (FDB 연동, 1,290,000~2,790,000)
 PPV_TABLE = {
-    "BAR0": 2490000, "BAR1": 2340000, "BAR2": 2190000, "BAR3": 2040000,
+    "BAR0P": 2790000, "BAR0": 2490000, "BAR1": 2340000, "BAR2": 2190000, "BAR3": 2040000,
     "BAR4": 1890000, "BAR5": 1740000, "BAR6": 1590000, "BAR7": 1440000, "BAR8": 1290000,
 }
-# GDB 그린밸리 더블 독립 BAR 요금표 (자체 OCC 기준, 298,000~678,000)
+# GDB 그린밸리 더블 독립 BAR 요금표 (자체 OCC 기준, 298,000~718,000)
 GDB_TABLE = {
-    "BAR0": 678000, "BAR1": 618000, "BAR2": 538000, "BAR3": 478000,
+    "BAR0P": 718000, "BAR0": 658000, "BAR1": 598000, "BAR2": 538000, "BAR3": 478000,
     "BAR4": 418000, "BAR5": 358000, "BAR6": 298000, "BAR7": 298000, "BAR8": 298000,
 }
-# GDF 그린밸리 패밀리 독립 BAR 요금표 (자체 OCC 기준, 392,000~878,000)
+# GDF 그린밸리 패밀리 독립 BAR 요금표 (자체 OCC 기준, 390,000~969,000)
 GDF_TABLE = {
-    "BAR0": 878000, "BAR1": 802000, "BAR2": 719000, "BAR3": 644000,
-    "BAR4": 579000, "BAR5": 522000, "BAR6": 473000, "BAR7": 430000, "BAR8": 392000,
+    "BAR0P": 969000, "BAR0": 880000, "BAR1": 796000, "BAR2": 717000, "BAR3": 642000,
+    "BAR4": 577000, "BAR5": 520000, "BAR6": 471000, "BAR7": 428000, "BAR8": 390000,
 }
-# FFD 포레스트 패밀리 더블 BAR 요금표 (FDE+20k 플로어 스냅업, 372,000~859,000)
+# FFD 포레스트 패밀리 더블 BAR 요금표 (FDE+20k 플로어 스냅업, 372,000~951,000)
 FFD_TABLE = {
-    "BAR0": 859000, "BAR1": 785000, "BAR2": 699000, "BAR3": 624000,
+    "BAR0P": 951000, "BAR0": 862000, "BAR1": 778000, "BAR2": 699000, "BAR3": 624000,
     "BAR4": 559000, "BAR5": 502000, "BAR6": 453000, "BAR7": 410000, "BAR8": 372000,
 }
 # 하위 호환용 (구 스냅샷 읽기 등에 사용될 수 있음, 신규 산출에는 미사용)
@@ -109,40 +113,62 @@ def get_season_details(date_obj):
     return type_code, season, is_weekend
 
 
-def determine_bar(season, is_weekend, occ):
-    if season == "UPP":
-        if is_weekend:
-            if occ >= 81: return "BAR1"
-            elif occ >= 51: return "BAR2"
-            elif occ >= 31: return "BAR3"
-            else: return "BAR4"
-        else:
-            if occ >= 81: return "BAR2"
-            elif occ >= 51: return "BAR3"
-            elif occ >= 31: return "BAR4"
-            else: return "BAR5"
-    elif season == "MID":
-        if is_weekend:
-            if occ >= 81: return "BAR3"
-            elif occ >= 51: return "BAR4"
-            elif occ >= 31: return "BAR5"
-            else: return "BAR6"
-        else:
-            if occ >= 81: return "BAR4"
-            elif occ >= 51: return "BAR5"
-            elif occ >= 31: return "BAR6"
-            else: return "BAR7"
-    else:  # UND
-        if is_weekend:
-            if occ >= 81: return "BAR4"
-            elif occ >= 51: return "BAR5"
-            elif occ >= 31: return "BAR6"
-            else: return "BAR7"
-        else:
-            if occ >= 81: return "BAR5"
-            elif occ >= 51: return "BAR6"
-            elif occ >= 31: return "BAR7"
-            else: return "BAR8"
+def get_start_bar(date_obj):
+    """날짜 기반 시작 BAR 반환 (해당 날 OCC 최저일 때의 BAR).
+    BAR_ORDER에서 인덱스 높을수록 저렴. 시작 BAR = OCC 0% 때의 BAR."""
+    m, d = date_obj.month, date_obj.day
+    md = f"{m:02d}.{d:02d}"
+    actual_is_weekend = date_obj.weekday() in [4, 5]
+
+    # ── 최성수기: BAR2 시작 (주중/주말 동일) ──
+    if (("07.25" <= md <= "08.08") or
+        ("08.14" <= md <= "08.16") or
+        ("09.24" <= md <= "09.28") or
+        ("10.01" <= md <= "10.10") or
+        ("12.24" <= md <= "12.26") or
+        md == "12.31"):
+        return "BAR2"
+
+    # ── 준성수기: BAR3 시작 ──
+    if "08.09" <= md <= "08.13":
+        return "BAR3"
+
+    # ── 여름 성수기 (7/17~8/29) 나머지: 주중 BAR5, 주말 BAR4 ──
+    if "07.17" <= md <= "08.29":
+        return "BAR4" if actual_is_weekend else "BAR5"
+
+    # ── 12월 겨울 특수 (21~30, 24~26은 위에서 처리) ──
+    if "12.21" <= md <= "12.30":
+        return "BAR4"
+
+    # ── 9~10월: 주중 BAR6, 주말 BAR5 ──
+    if "09.01" <= md <= "10.31":
+        return "BAR5" if actual_is_weekend else "BAR6"
+
+    # ── 11월~12월20일: 주중 BAR7, 주말 BAR6 ──
+    if "11.01" <= md <= "12.20":
+        return "BAR6" if actual_is_weekend else "BAR7"
+
+    # ── 나머지 날짜 (1~6월, 7월 1~16일): 기존 시즌 로직으로 매핑 ──
+    _, season, is_weekend_ovr = get_season_details(date_obj)
+    # is_weekend_ovr 포함 (설날·추석 등 휴일 평일→주말 오버라이드 반영)
+    return {
+        ("UPP", True):  "BAR4", ("UPP", False):  "BAR5",
+        ("MID", True):  "BAR6", ("MID", False):  "BAR7",
+        ("UND", True):  "BAR7", ("UND", False):  "BAR8",
+    }.get((season, is_weekend_ovr), "BAR8")
+
+
+def determine_bar(date_obj, occ):
+    """날짜 + OCC → BAR 코드.
+    시작 BAR에서 OCC 구간마다 한 단계씩 고가 BAR로 이동 (최대 3단계)."""
+    start_bar = get_start_bar(date_obj)
+    start_idx = BAR_ORDER.index(start_bar)
+    if occ >= 81:   offset = 3
+    elif occ >= 51: offset = 2
+    elif occ >= 31: offset = 1
+    else:           offset = 0
+    return BAR_ORDER[max(0, start_idx - offset)]
 
 
 # =============================================================================
@@ -211,7 +237,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         except Exception:
             pass
     hotel_occ = ((total_rooms_sum - total_avail_sum) / total_rooms_sum * 100) if total_rooms_sum > 0 else 0
-    hotel_bar = determine_bar(season, is_weekend, hotel_occ)
+    hotel_bar = determine_bar(date_obj, hotel_occ)
 
     result = {}
 
@@ -235,7 +261,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         if manual_bar:
             bar, is_manual = manual_bar, True
         else:
-            bar, is_manual = determine_bar(season, is_weekend, occ), False
+            bar, is_manual = determine_bar(date_obj, occ), False
 
         bars[rid] = bar
         is_manuals[rid] = is_manual
@@ -283,7 +309,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             av = 0.0
         tot = m.iloc[0]['Total']
         occ = ((tot - av) / tot * 100) if tot > 0 else 0
-        own_bar = determine_bar(season, is_weekend, occ)
+        own_bar = determine_bar(date_obj, occ)
         base_p = table.get(own_bar, list(table.values())[-1])
         scarcity = compute_scarcity_premium(av, date_obj)
         final_p = min(base_p + scarcity, cap)
@@ -399,24 +425,24 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
         return occ, bar, price, True
 
     if room_id in DYNAMIC_ROOMS:
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
     elif room_id == "FPT":
         # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = FPT_TABLE.get(bar, 500000)
     elif room_id == "PPV":
         # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = PPV_TABLE.get(bar, 1290000)
     elif room_id == "GDB":
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = GDB_TABLE.get(bar, 298000)
     elif room_id == "GDF":
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = GDF_TABLE.get(bar, 392000)
     elif room_id == "FFD":
-        bar = determine_bar(season, is_weekend, occ)
+        bar = determine_bar(date_obj, occ)
         price = FFD_TABLE.get(bar, 372000)
     else:
         bar = type_code
