@@ -2341,6 +2341,231 @@ def render_mobile_card_view(current_df, applied_rates):
 # =============================================================================
 # 4-H. 변경 이력 조회 UI (C 개선)
 # =============================================================================
+
+# =============================================================================
+# 오버라이드 → 권장값 초기화 UI
+# =============================================================================
+def render_reset_override_ui(current_df, applied_rates):
+    """저장된 오버라이드를 시스템 권장값으로 초기화하는 UI."""
+    st.subheader("🔄 오버라이드 → 권장값으로 초기화")
+
+    all_ovr = sorted([d for d, v in applied_rates.items() if v.get('rooms')])
+    if not all_ovr:
+        st.info("현재 저장된 오버라이드가 없습니다.")
+        return
+
+    st.caption(f"현재 오버라이드 적용 날짜: **{len(all_ovr)}일**")
+
+    mode = st.radio(
+        "초기화 대상 설정",
+        ["전체", "특정일 지정", "특정기간 지정"],
+        horizontal=True,
+        key="rov_mode"
+    )
+
+    if 'rov_incl' not in st.session_state:
+        st.session_state['rov_incl'] = []
+    if 'rov_excl' not in st.session_state:
+        st.session_state['rov_excl'] = []
+
+    target = set()
+
+    if mode == "전체":
+        target = set(all_ovr)
+        with st.expander("➖ 특정일/기간 제외 설정"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**날짜 단위 제외**")
+                ed = st.date_input("제외 날짜", key="rov_excl_d",
+                                   min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+                if st.button("➕ 날짜 제외 추가", key="rov_add_ed"):
+                    ds = ed.strftime('%Y-%m-%d')
+                    if ds not in st.session_state['rov_excl']:
+                        st.session_state['rov_excl'].append(ds)
+                        st.rerun()
+            with c2:
+                st.markdown("**기간 단위 제외**")
+                er_s = st.date_input("제외 시작", key="rov_excl_rs",
+                                     min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+                er_e = st.date_input("제외 종료", key="rov_excl_re",
+                                     min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+                if st.button("➕ 기간 제외 추가", key="rov_add_er"):
+                    if er_s <= er_e:
+                        cur = er_s
+                        while cur <= er_e:
+                            ds2 = cur.strftime('%Y-%m-%d')
+                            if ds2 not in st.session_state['rov_excl']:
+                                st.session_state['rov_excl'].append(ds2)
+                            cur += timedelta(days=1)
+                        st.rerun()
+                    else:
+                        st.error("시작일이 종료일보다 늦습니다.")
+            if st.session_state['rov_excl']:
+                excl_sorted = sorted(st.session_state['rov_excl'])
+                st.markdown(f"**제외 목록 ({len(excl_sorted)}일):**")
+                st.caption(", ".join(excl_sorted[:20]) + ("..." if len(excl_sorted) > 20 else ""))
+                if st.button("🗑 제외 목록 전체 삭제", key="rov_clear_excl"):
+                    st.session_state['rov_excl'] = []
+                    st.rerun()
+        target -= set(st.session_state['rov_excl'])
+
+    elif mode == "특정일 지정":
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            sd = st.date_input("날짜 선택", key="rov_incl_d",
+                               min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+        with c2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("➕ 추가", key="rov_add_incl"):
+                ds = sd.strftime('%Y-%m-%d')
+                if ds not in st.session_state['rov_incl']:
+                    st.session_state['rov_incl'].append(ds)
+                    st.rerun()
+        if st.session_state['rov_incl']:
+            incl_sorted = sorted(st.session_state['rov_incl'])
+            st.markdown(f"**추가된 날짜 ({len(incl_sorted)}일):**")
+            st.caption(", ".join(incl_sorted))
+            if st.button("🗑 목록 초기화", key="rov_clear_incl"):
+                st.session_state['rov_incl'] = []
+                st.rerun()
+        target = set(st.session_state['rov_incl']) & set(all_ovr)
+
+    elif mode == "특정기간 지정":
+        c1, c2, c3 = st.columns([2, 2, 1])
+        with c1:
+            rs = st.date_input("시작일", key="rov_range_s",
+                               min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+        with c2:
+            re_ = st.date_input("종료일", key="rov_range_e",
+                                min_value=date(2025, 1, 1), max_value=date(2027, 12, 31))
+        with c3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("➕ 기간 추가", key="rov_add_range"):
+                if rs <= re_:
+                    cur = rs
+                    while cur <= re_:
+                        ds = cur.strftime('%Y-%m-%d')
+                        if ds not in st.session_state['rov_incl']:
+                            st.session_state['rov_incl'].append(ds)
+                        cur += timedelta(days=1)
+                    st.rerun()
+                else:
+                    st.error("시작일이 종료일보다 늦습니다.")
+        if st.session_state['rov_incl']:
+            incl_sorted = sorted(st.session_state['rov_incl'])
+            st.markdown(f"**선택된 날짜 ({len(incl_sorted)}일):**")
+            st.caption(", ".join(incl_sorted[:30]) + ("..." if len(incl_sorted) > 30 else ""))
+            if st.button("🗑 목록 초기화", key="rov_clear_range"):
+                st.session_state['rov_incl'] = []
+                st.rerun()
+        target = set(st.session_state['rov_incl']) & set(all_ovr)
+
+    final = sorted(target)
+    if final:
+        st.info(f"초기화 대상: **{len(final)}일** — 오버라이드 삭제 → 시스템 권장값 자동 적용")
+        with st.expander("📋 대상 날짜 전체 확인"):
+            st.write(", ".join(final))
+        if st.button("🔄 권장값으로 변경 저장", type="primary", key="rov_save"):
+            prog = st.progress(0)
+            ok_count = 0
+            for i, date_str in enumerate(final):
+                prev_info = applied_rates.get(date_str, {})
+                if delete_applied_rate(
+                    date_str,
+                    prev_rooms=prev_info.get('rooms', {}),
+                    prev_memo=prev_info.get('memo', ''),
+                    prev_rec_at_apply=prev_info.get('rec_bar_at_apply'),
+                ):
+                    ok_count += 1
+                prog.progress((i + 1) / len(final))
+            st.success(f"✅ {ok_count}일 초기화 완료")
+            st.session_state['rov_incl'] = []
+            st.session_state['rov_excl'] = []
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.caption("날짜를 추가하면 초기화 버튼이 활성화됩니다.")
+
+
+# =============================================================================
+# 전체 BAR 캘린더 (6/21 ~ 12/31)
+# =============================================================================
+def render_bar_calendar_table(current_df, applied_rates):
+    """6/21~12/31 최종 확정 요금 BAR 캘린더. 같은 BAR는 같은 색상."""
+    st.subheader("📅 전체 요금 BAR 캘린더 (6/21 ~ 12/31)")
+    st.caption("오버라이드 저장 완료 후 새로고침 시 최종 확정 요금 반영. 주황 테두리 = 오버라이드 적용 셀.")
+
+    if current_df is None or current_df.empty:
+        st.warning("데이터가 없습니다. 파일을 먼저 업로드해 주세요.")
+        return
+
+    cal_start = date(TODAY.year, 6, 21)
+    cal_end   = date(TODAY.year, 12, 31)
+    all_dates = []
+    d = cal_start
+    while d <= cal_end:
+        all_dates.append(d)
+        d += timedelta(days=1)
+
+    rooms = ALL_ROOMS
+    parts = [
+        '<div style="overflow-x:auto;font-size:11px;margin-top:8px;">',
+        '<table style="border-collapse:collapse;white-space:nowrap;min-width:max-content;">',
+        '<thead><tr style="background:#1A237E;color:white;">',
+        '<th style="padding:5px 8px;border:1px solid #3949AB;min-width:72px;">날짜</th>',
+        '<th style="padding:5px 5px;border:1px solid #3949AB;min-width:28px;">요일</th>',
+    ]
+    for rid in rooms:
+        parts.append(f'<th style="padding:5px 8px;border:1px solid #3949AB;min-width:70px;">{rid}</th>')
+    parts.append('</tr></thead><tbody>')
+
+    for d in all_dates:
+        date_str = d.strftime('%Y-%m-%d')
+        wd = WEEKDAYS_KR[d.weekday()]
+        is_we = d.weekday() in [4, 5]
+        is_today = (d == TODAY)
+        row_bg = "#FFF8E1" if is_we else ("#E3F2FD" if is_today else "white")
+        wd_color = "#E53935" if is_we else ("#1565C0" if is_today else "#555")
+
+        parts.append(f'<tr style="background:{row_bg};">')
+        parts.append(
+            f'<td style="padding:3px 7px;border:1px solid #ddd;font-weight:{"bold" if is_we or is_today else "normal"};">'
+            f'{"⭐ " if is_today else ""}{date_str[5:]}</td>'
+        )
+        parts.append(
+            f'<td style="padding:3px 4px;border:1px solid #ddd;text-align:center;color:{wd_color};'
+            f'font-weight:{"bold" if is_we else "normal"};">{wd}</td>'
+        )
+
+        rec_all = compute_all_prices_for_date(d, current_df)
+        for rid in rooms:
+            applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
+            bar = applied_bar if applied_bar else (rec_all.get(rid) or {}).get('bar', '-')
+            is_ovr = bool(applied_bar)
+            price = get_bar_price(rid, bar) if (bar and bar != '-') else 0
+            price_str = f"{price // 1000}k" if price else "-"
+            bg = BAR_GRADIENT_COLORS.get(bar, "#EEE")
+            tc = "white" if bar in ("BAR0P", "BAR0", "BAR1", "BAR2", "BAR3") else "#333"
+            border = "border:2.5px solid #FF8F00;" if is_ovr else "border:1px solid #ddd;"
+            parts.append(
+                f'<td style="padding:3px 5px;{border}background:{bg};color:{tc};text-align:center;">'
+                f'<span style="font-size:10px;font-weight:bold;">{bar}</span><br>'
+                f'<span style="font-size:9px;opacity:0.88;">{price_str}</span></td>'
+            )
+        parts.append('</tr>')
+
+    parts.append('</tbody></table></div>')
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+    leg = ['<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">']
+    for bar in BAR_ORDER:
+        bg = BAR_GRADIENT_COLORS.get(bar, "#eee")
+        tc = "white" if bar in ("BAR0P", "BAR0", "BAR1", "BAR2", "BAR3") else "#333"
+        leg.append(f'<span style="background:{bg};color:{tc};padding:3px 10px;border-radius:4px;font-size:11px;font-weight:bold;">{bar}</span>')
+    leg.append('<span style="border:2.5px solid #FF8F00;padding:3px 8px;border-radius:4px;font-size:11px;">주황 테두리 = 오버라이드</span>')
+    leg.append('</div>')
+    st.markdown("".join(leg), unsafe_allow_html=True)
+
 def render_audit_log_ui():
     """변경 이력 조회 화면"""
     with st.expander("📋 변경 이력 (Audit Log)", expanded=False):
@@ -3308,6 +3533,15 @@ if not st.session_state.today_df.empty:
         # 변경 이력 & 복원 지점 UI
         render_audit_log_ui()
         render_restore_point_ui()
+
+        st.divider()
+
+        # 오버라이드 초기화 & BAR 캘린더
+        render_reset_override_ui(st.session_state.today_df, applied_rates_data)
+
+        st.divider()
+
+        render_bar_calendar_table(st.session_state.today_df, applied_rates_data)
 
         st.divider()
 
