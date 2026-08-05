@@ -120,11 +120,14 @@ def get_start_bar(date_obj):
     md = f"{m:02d}.{d:02d}"
     actual_is_weekend = date_obj.weekday() in [4, 5]
 
+    # ── 9~10월 최성수기: BAR1 시작 (ADR 인상, 한 단계 상향) ──
+    if (("09.24" <= md <= "09.28") or
+        ("10.01" <= md <= "10.10")):
+        return "BAR1"
+
     # ── 최성수기: BAR2 시작 (주중/주말 동일) ──
     if (("07.25" <= md <= "08.08") or
         ("08.14" <= md <= "08.16") or
-        ("09.24" <= md <= "09.28") or
-        ("10.01" <= md <= "10.10") or
         ("12.24" <= md <= "12.26") or
         md == "12.31"):
         return "BAR2"
@@ -141,9 +144,9 @@ def get_start_bar(date_obj):
     if "12.21" <= md <= "12.30":
         return "BAR4"
 
-    # ── 9~10월: 주중 BAR6, 주말 BAR5 ──
+    # ── 9~10월: 주중 BAR5, 주말 BAR4 (ADR 인상, 한 단계 상향) ──
     if "09.01" <= md <= "10.31":
-        return "BAR5" if actual_is_weekend else "BAR6"
+        return "BAR4" if actual_is_weekend else "BAR5"
 
     # ── 11월~12월20일: 주중 BAR7, 주말 BAR6 ──
     if "11.01" <= md <= "12.20":
