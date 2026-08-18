@@ -82,6 +82,105 @@ FIXED_PRICE_TABLE = {
 
 TODAY = date.today()
 
+# 객실별 요금 상한 (희소성 프리미엄 가산 후 클램프) — 한 곳에서만 관리
+# ⚠️ 상한이 요금표 BAR0P보다 낮으면 그 BAR는 도달 불가 구간이 됩니다.
+#    validate_price_tables()가 시작 시 자동 점검합니다.
+ROOM_PRICE_CAPS = {
+    "GDB": 678000,    # 요금표 BAR0P = 718,000
+    "GDF": 878000,    # 요금표 BAR0P = 969,000
+    "FPT": 900000,    # 요금표 BAR0P = 950,000
+    "PPV": 2490000,   # 요금표 BAR0P = 2,790,000
+}
+
+# 객실ID → 요금표 매핑 (여러 함수에 흩어져 있던 if/elif 체인 통합)
+def get_room_table(room_id):
+    if room_id in DYNAMIC_ROOMS:
+        return PRICE_TABLE.get(room_id, {})
+    return {"FPT": FPT_TABLE, "PPV": PPV_TABLE, "GDB": GDB_TABLE,
+            "GDF": GDF_TABLE, "FFD": FFD_TABLE}.get(room_id, {})
+
+
+def bar_rank(bar):
+    """BAR 코드 → BAR_ORDER 인덱스 (0=최고가). 알 수 없으면 None."""
+    try:
+        return BAR_ORDER.index(str(bar).strip().upper())
+    except (ValueError, AttributeError):
+        return None
+
+
+def is_valid_bar(bar):
+    return bar_rank(bar) is not None
+
+
+# --- 데이터 품질 이슈 수집 (리런 단위, 화면 경고용) ---
+_data_issues = {}   # {(date_str, rid): "사유"}
+_logic_errors = []  # 예외를 삼키지 않고 여기에 기록
+
+
+def _record_issue(date_str, rid, reason):
+    _data_issues[(date_str, rid)] = reason
+
+
+def normalize_inventory(av_raw, tot_raw, date_str, rid, fallback_occ=None):
+    """잔여/전체 객실을 검증·정규화하고 OCC를 반환.
+
+    반환: (occ, avail_effective, total_effective, ok)
+    - Total 결측/0, Available 결측 → OCC 계산 불가 → fallback_occ(호텔 OCC) 사용, 이슈 기록
+    - Available > Total → Total로 클램프, 이슈 기록
+    ※ 기존 코드는 결측을 조용히 0으로 바꿔 '매진(최고가)' 또는 '공실(최저가)'로
+      단정해 오요금을 만들었습니다. 여기서는 단정하지 않고 호텔 OCC로 대체 + 경고합니다.
+    """
+    try:
+        tot = float(tot_raw) if pd.notna(tot_raw) else float('nan')
+    except (TypeError, ValueError):
+        tot = float('nan')
+    try:
+        av = float(av_raw) if pd.notna(av_raw) else float('nan')
+    except (TypeError, ValueError):
+        av = float('nan')
+
+    if not (tot == tot) or tot <= 0:          # NaN 또는 0 이하
+        _record_issue(date_str, rid, f"전체객실 값 이상({tot_raw!r}) → 호텔 OCC로 대체")
+        return (fallback_occ if fallback_occ is not None else 0.0), av, tot, False
+    if not (av == av):                        # Available NaN
+        _record_issue(date_str, rid, "잔여객실 결측 → 호텔 OCC로 대체")
+        return (fallback_occ if fallback_occ is not None else 0.0), av, tot, False
+    if av < 0:
+        _record_issue(date_str, rid, f"잔여객실 음수({av:g}) → 0으로 처리")
+        av = 0.0
+    if av > tot:
+        _record_issue(date_str, rid, f"잔여({av:g}) > 전체({tot:g}) → 전체로 클램프")
+        av = tot
+    return ((tot - av) / tot * 100), av, tot, True
+
+
+def validate_inventory_df(df):
+    """업로드 직후 재고 데이터 무결성 점검. 반환: list of (date, rid, 사유)"""
+    if df is None or df.empty:
+        return []
+    bad = []
+    for _, r in df.iterrows():
+        rid, d = r.get('RoomID'), r.get('Date')
+        tot, av = r.get('Total'), r.get('Available')
+        try:
+            tot_f = float(tot) if pd.notna(tot) else float('nan')
+        except (TypeError, ValueError):
+            tot_f = float('nan')
+        try:
+            av_f = float(av) if pd.notna(av) else float('nan')
+        except (TypeError, ValueError):
+            av_f = float('nan')
+        if not (tot_f == tot_f) or tot_f <= 0:
+            bad.append((d, rid, f"전체객실 결측/0 ({tot!r})"))
+        elif not (av_f == av_f):
+            bad.append((d, rid, "잔여객실 결측"))
+        elif av_f > tot_f:
+            bad.append((d, rid, f"잔여({av_f:g}) > 전체({tot_f:g})"))
+        elif av_f < 0:
+            bad.append((d, rid, f"잔여객실 음수 ({av_f:g})"))
+    return bad
+
+
 # Firebase 컬렉션 이름 (스네이크케이스)
 COL_SNAPSHOTS = "daily_snapshots"
 COL_APPLIED = "applied_rates"
@@ -162,16 +261,129 @@ def get_start_bar(date_obj):
     }.get((season, is_weekend_ovr), "BAR8")
 
 
-def determine_bar(date_obj, occ):
-    """날짜 + OCC → BAR 코드.
-    시작 BAR에서 OCC 구간마다 한 단계씩 고가 BAR로 이동 (최대 3단계)."""
-    start_bar = get_start_bar(date_obj)
-    start_idx = BAR_ORDER.index(start_bar)
-    if occ >= 81:   offset = 3
-    elif occ >= 51: offset = 2
-    elif occ >= 31: offset = 1
-    else:           offset = 0
-    return BAR_ORDER[max(0, start_idx - offset)]
+# =============================================================================
+# 3-V2. 요금 곡선 설정 (2단계) — 이 블록의 숫자만 만지면 곡선이 바뀝니다
+# =============================================================================
+# 요금 로직 버전. False로 두면 기존(1단계) 곡선으로 그대로 돌아갑니다.
+# 하단 "구/신 요금 비교" 패널이 이 값을 일시적으로 바꿔가며 두 결과를 대조합니다.
+_PRICING_V2 = True
+
+# ── OCC 구간별 인상 단계 ─────────────────────────────────────────────
+# (기존) 31%/51%/81% → 1/2/3단계, 최대 3단계에서 캡
+#   → 비수기 시작BAR8에서 100% 매진해도 BAR5(최고가의 50%)에서 멈췄습니다.
+# (신규) 임계값을 30/50/70/85/90/95로 정정·확장하고 최대 6단계까지 허용.
+#   임계값을 31→30으로 내린 이유: 20실 객실은 OCC가 5% 단위로만 움직여
+#   '31% 이상'의 실효 임계값이 35%였습니다(80%→85%, 50%→55%도 동일).
+OCC_OFFSET_LADDER = [
+    (95, 6),
+    (90, 5),
+    (85, 4),
+    (70, 3),
+    (50, 2),
+    (30, 1),
+]
+# 인상 단계 상한. 이 값 하나로 요금 곡선의 공격성을 조절합니다.
+# (오늘~180일 × OCC 0~100% 전수 시뮬레이션 기준 / 비수기 11/10 FDB 매진 시 요금)
+#   3 → 기존과 동일   전체 +2.0%,  OCC90%↑ -3.0%   | 502,000 (최고가의 56%)
+#   4 →              전체 +5.7%,  OCC90%↑ +5.6%   | 567,000 (63%)
+#   5 →              전체 +8.4%,  OCC90%↑ +14.3%  | 642,000 (72%)  ← 기본값
+#   6 →              전체 +9.7%,  OCC90%↑ +20.4%  | 721,000 (81%)
+# 하단 "🔬 구/신 요금 곡선 비교" 패널에서 실제 데이터로 확인한 뒤 조정하세요.
+OCC_OFFSET_MAX = 5
+
+# ── 잔여 객실 수 기준 희소성 (재고 규모 차이 보정) ──────────────────
+# %만 쓰면 재고가 작은 객실이 불리합니다.
+#   20실 객실: 잔여 1실 = 95% → 6단계 인상
+#    6실 객실: 잔여 1실 = 83% → 4단계에서 멈춤
+# 잔여 실수 기준 하한을 같이 적용해 재고 규모와 무관하게 맞춥니다.
+# ※ OCC가 SCARCITY_MIN_OCC 미만이면 적용하지 않습니다
+#   (4실 중 3실 공실=OCC 25%를 '희소'로 오판하지 않도록)
+SCARCITY_BY_AVAIL = {1: 6, 2: 5, 3: 4}
+SCARCITY_MIN_OCC = 50
+
+# ── 판매 부진 시 인하 경로 (신규) ────────────────────────────────────
+# 기존에는 OCC가 요금을 올리기만 하고 절대 내리지 못해, 성수기 공실 100%에도
+# 시작BAR(예: 9/25 BAR1 = FDB 721,000)이 그대로 유지됐습니다.
+# (체크인까지 남은 일수, OCC 상한, 인하 단계)
+DISCOUNT_RULES = [
+    (14, 20, 2),   # 체크인 14일 이내 + OCC 20% 미만 → 2단계 인하
+    (30, 30, 1),   # 체크인 30일 이내 + OCC 30% 미만 → 1단계 인하
+]
+DISCOUNT_MAX_STEPS = 2          # 시작BAR 대비 최대 인하 단계
+# 인하는 요금표 최저 BAR(BAR8)를 하한으로 자동 클램프됩니다.
+
+# ── 연동 객실이 자체 재고를 반영하는 폭 ──────────────────────────────
+# FPT·PPV는 FDB BAR를, FFD는 FDE 가격을 그대로 따라갔습니다(자체 재고 무시).
+# 연동 BAR 기준 ±LINK_FLEX_STEPS 단계까지 자체 재고 신호를 반영합니다.
+LINK_FLEX_STEPS = 2
+
+# ── 메인 5객실 OCC 혼합 비율 (기본 0 = 기존 동작 유지) ───────────────
+# 0.0 → 객실별 OCC 그대로 (현행). 하위객실 1개가 매진되면 역전방지가
+#        상위객실 전체를 끌어올리는 캐스케이드가 남습니다.
+# 0.5 → 객실별 OCC와 호텔 전체 OCC를 반반 섞어 캐스케이드 폭을 절반으로.
+# 1.0 → 호텔 전체 OCC만 사용 (캐스케이드 소멸, 객실별 신호도 소멸).
+# ※ 이 값을 올리면 요금 성향이 크게 바뀝니다. 비교 패널로 먼저 확인하세요.
+ROOM_OCC_BLEND = 0.0
+
+
+def occ_to_offset(occ, avail=None):
+    """OCC(+잔여 실수)를 BAR 인상 단계로 변환."""
+    offset = 0
+    for threshold, off in OCC_OFFSET_LADDER:
+        if occ >= threshold:
+            offset = off
+            break
+    if avail is not None and occ >= SCARCITY_MIN_OCC:
+        try:
+            a = int(float(avail))
+        except (TypeError, ValueError):
+            a = None
+        if a is not None:
+            for limit in sorted(SCARCITY_BY_AVAIL):
+                if a <= limit:
+                    offset = max(offset, SCARCITY_BY_AVAIL[limit])
+                    break
+    return min(offset, OCC_OFFSET_MAX)
+
+
+def discount_steps(date_obj, occ):
+    """판매 부진 인하 단계 (0 이상). 과거 날짜에는 적용하지 않습니다."""
+    days = (date_obj - TODAY).days
+    if days < 0:
+        return 0
+    for max_days, max_occ, steps in DISCOUNT_RULES:
+        if days <= max_days and occ < max_occ:
+            return min(steps, DISCOUNT_MAX_STEPS)
+    return 0
+
+
+def determine_bar(date_obj, occ, avail=None):
+    """날짜 + OCC(+잔여 실수) → BAR 코드.
+
+    시작 BAR에서 OCC에 따라 고가 BAR로 이동하고, 판매 부진 시 저가 BAR로 내려갑니다.
+    avail을 넘기면 잔여 실수 기준 희소성이 함께 반영됩니다(재고 규모 보정).
+    _PRICING_V2 = False 이면 기존 곡선(31/51/81 → 최대 3단계, 인하 없음)으로 동작합니다.
+    """
+    start_idx = BAR_ORDER.index(get_start_bar(date_obj))
+
+    if not _PRICING_V2:
+        if occ >= 81:   offset = 3
+        elif occ >= 51: offset = 2
+        elif occ >= 31: offset = 1
+        else:           offset = 0
+        return BAR_ORDER[max(0, start_idx - offset)]
+
+    offset = occ_to_offset(occ, avail) - discount_steps(date_obj, occ)
+    idx = start_idx - offset
+    return BAR_ORDER[max(0, min(len(BAR_ORDER) - 1, idx))]
+
+
+def blend_occ(room_occ, hotel_occ):
+    """메인 5객실용 혼합 OCC (ROOM_OCC_BLEND=0 이면 객실별 OCC 그대로)."""
+    if not _PRICING_V2 or not ROOM_OCC_BLEND:
+        return room_occ
+    w = max(0.0, min(1.0, ROOM_OCC_BLEND))
+    return room_occ * (1 - w) + hotel_occ * w
 
 
 # =============================================================================
@@ -180,12 +392,52 @@ def determine_bar(date_obj, occ):
 _price_cache = {}  # 리런 단위 캐시 (모듈 레벨, 리런마다 초기화됨)
 
 
-def compute_scarcity_premium(avail, date_obj):
-    """희소성 프리미엄: 잔여2실 +20,000 / 잔여1실 +50,000 / 체크인7일이내 잔여1실 +70,000"""
+def _rows_signature(df, date_obj):
+    """캐시 키용 — 해당 날짜 행의 '내용' 지문. id(df) 대신 사용."""
     try:
-        avail_int = int(float(avail)) if pd.notna(avail) else 999
-    except Exception:
-        avail_int = 999
+        rows = df[df['Date'] == date_obj]
+        if rows.empty:
+            return "empty"
+        return tuple(
+            (str(r['RoomID']),
+             None if pd.isna(r['Available']) else float(r['Available']),
+             None if pd.isna(r['Total']) else float(r['Total']))
+            for _, r in rows.sort_values('RoomID').iterrows()
+        )
+    except Exception as e:
+        _logic_errors.append(f"_rows_signature 실패: {type(e).__name__}: {e}")
+        return "unhashable"
+
+
+def _clean_manual_bar(raw, date_str=None, rid=None):
+    """수동 오버라이드 BAR 값 정규화. 유효하지 않으면 None + 경고 기록.
+    ※ 기존에는 'BAR 3', '3' 같은 오타가 그대로 저장되어 가격 0원으로 판매됐습니다."""
+    if raw is None:
+        return None
+    s = str(raw).strip().upper().replace(" ", "")
+    if not s or s in ("NONE", "NAN"):
+        return None
+    if is_valid_bar(s):
+        return s
+    if date_str and rid:
+        _record_issue(date_str, rid, f"수동 오버라이드 값 '{raw}' 이 유효한 BAR 코드가 아님 → 무시")
+    return None
+
+
+def compute_scarcity_premium(avail, date_obj):
+    """희소성 프리미엄: 잔여2실 +20,000 / 잔여1실 +50,000 / 체크인7일이내 잔여1실 +70,000
+
+    ※ 수정: 잔여 0(매진)에는 프리미엄을 붙이지 않습니다. 팔 수 없는 재고에
+      프리미엄을 얹어 표시 요금만 부풀리던 동작을 제거했습니다.
+    ※ 수정: 결측(NaN)은 '재고 999실'로 단정하지 않고 프리미엄 0으로 처리하며,
+      결측 자체는 normalize_inventory()가 경고로 표면화합니다.
+    """
+    try:
+        avail_int = int(float(avail)) if pd.notna(avail) else None
+    except (TypeError, ValueError):
+        avail_int = None
+    if avail_int is None or avail_int <= 0:
+        return 0
     days_to_checkin = (date_obj - TODAY).days
     if avail_int <= 1:
         return 70000 if days_to_checkin <= 7 else 50000
@@ -195,20 +447,25 @@ def compute_scarcity_premium(avail, date_obj):
 
 
 def snap_to_bar_ceil(table, floor_price):
-    """floor_price 이상인 BAR 중 가장 저렴한(번호 높은) BAR 반환.
+    """floor_price 이상인 BAR 중 가장 저렴한 BAR 반환.
     예) FFD floor=609,000 → BAR5(502,000)는 미달, BAR4(559,000)도 미달,
         BAR3(624,000) ≥ 609,000 → 'BAR3'
-    모든 BAR가 floor 미만이면 'BAR0'(최고가) 반환."""
-    best_bar = "BAR0"
-    best_num = -1
+    모든 BAR가 floor 미만이면 최고가 BAR 반환.
+    ※ 수정: 기존 int(bar.replace('BAR','')) 방식은 'BAR0P'에서 예외가 나 최고가
+      BAR가 후보에서 빠졌습니다. BAR_ORDER 기준으로 교체."""
+    best_bar, best_rank = None, -1
     for bar, price in table.items():
-        try:
-            num = int(bar.replace("BAR", ""))
-        except Exception:
+        r = bar_rank(bar)
+        if r is None:
             continue
-        if price >= floor_price and num > best_num:
-            best_num = num
-            best_bar = bar
+        if price >= floor_price and r > best_rank:
+            best_rank, best_bar = r, bar
+    if best_bar is None:
+        # 전 BAR가 floor 미만 → 표에 존재하는 최고가 BAR
+        for b in BAR_ORDER:
+            if b in table:
+                return b
+        return "BAR0"
     return best_bar
 
 
@@ -224,21 +481,28 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         manual_bars = {}
 
     date_str = date_obj.strftime('%Y-%m-%d')
-    cache_key = (date_str, id(curr_df), tuple(sorted(manual_bars.items())))
+    # ※ 수정: 캐시 키에 id(curr_df)를 쓰면 (a) 내용 변경을 감지하지 못하고
+    #   (b) DataFrame이 GC된 뒤 주소가 재사용되면 다른 데이터의 값을 반환합니다.
+    #   해당 날짜 행의 내용 지문으로 교체.
+    cache_key = (date_str, _rows_signature(curr_df, date_obj),
+                 tuple(sorted(manual_bars.items())), _PRICING_V2, ROOM_OCC_BLEND)
     if cache_key in _price_cache:
         return _price_cache[cache_key]
 
-    type_code, season, is_weekend = get_season_details(date_obj)
     date_rows = curr_df[curr_df['Date'] == date_obj]
 
-    # Step 1. 전체 호텔 OCC
+    # Step 1. 전체 호텔 OCC (정상 데이터 행만으로 계산 — 결측 행이 지표를 오염시키지 않게)
     total_avail_sum, total_rooms_sum = 0.0, 0.0
     for _, row in date_rows.iterrows():
         try:
-            total_avail_sum += float(row['Available']) if pd.notna(row['Available']) else 0.0
-            total_rooms_sum += float(row['Total']) if pd.notna(row['Total']) else 0.0
-        except Exception:
-            pass
+            tot_f = float(row['Total']) if pd.notna(row['Total']) else float('nan')
+            av_f = float(row['Available']) if pd.notna(row['Available']) else float('nan')
+        except (TypeError, ValueError):
+            continue
+        if not (tot_f == tot_f) or tot_f <= 0 or not (av_f == av_f):
+            continue
+        total_avail_sum += min(max(av_f, 0.0), tot_f)
+        total_rooms_sum += tot_f
     hotel_occ = ((total_rooms_sum - total_avail_sum) / total_rooms_sum * 100) if total_rooms_sum > 0 else 0
     hotel_bar = determine_bar(date_obj, hotel_occ)
 
@@ -252,19 +516,17 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         m = date_rows[date_rows['RoomID'] == rid]
         if m.empty:
             continue
-        try:
-            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
-        except Exception:
-            av = 0.0
-        tot = m.iloc[0]['Total']
-        occ = ((tot - av) / tot * 100) if tot > 0 else 0
+        occ, av, tot, _ok = normalize_inventory(
+            m.iloc[0]['Available'], m.iloc[0]['Total'], date_str, rid, fallback_occ=hotel_occ)
         occs[rid] = occ
 
-        manual_bar = manual_bars.get(f"{date_str}_{rid}")
+        manual_bar = _clean_manual_bar(manual_bars.get(f"{date_str}_{rid}"), date_str, rid)
         if manual_bar:
             bar, is_manual = manual_bar, True
         else:
-            bar, is_manual = determine_bar(date_obj, occ), False
+            # ROOM_OCC_BLEND=0(기본)이면 객실별 OCC 그대로 — 기존 동작과 동일
+            bar = determine_bar(date_obj, blend_occ(occ, hotel_occ), av)
+            is_manual = False
 
         bars[rid] = bar
         is_manuals[rid] = is_manual
@@ -302,154 +564,197 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
     # Step 5. GDB/GDF: 자체 OCC 기반 독립 BAR (그린밸리 펜션형, 메인 계층 무관)
     fde_p = fp.get("FDE", 0)
 
-    for rid, table, cap in [("GDB", GDB_TABLE, 678000), ("GDF", GDF_TABLE, 878000)]:
+    for rid, table in [("GDB", GDB_TABLE), ("GDF", GDF_TABLE)]:
         m = date_rows[date_rows['RoomID'] == rid]
         if m.empty:
             continue
-        try:
-            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
-        except Exception:
-            av = 0.0
-        tot = m.iloc[0]['Total']
-        occ = ((tot - av) / tot * 100) if tot > 0 else 0
-        own_bar = determine_bar(date_obj, occ)
-        base_p = table.get(own_bar, list(table.values())[-1])
-        scarcity = compute_scarcity_premium(av, date_obj)
-        final_p = min(base_p + scarcity, cap)
-        eff_bar = price_to_effective_bar(rid, final_p) or own_bar
-        result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': own_bar, 'price': final_p, 'is_manual': False}
+        cap = ROOM_PRICE_CAPS.get(rid)
+        occ, av, tot, _ok = normalize_inventory(
+            m.iloc[0]['Available'], m.iloc[0]['Total'], date_str, rid, fallback_occ=hotel_occ)
 
-    # Step 6. FFD: FDE+20k 플로어 기준 FFD_TABLE 스냅업 (FDE 연동)
+        # ※ 수정: 고정객실도 수동 오버라이드를 반영합니다.
+        #   (기존에는 오버라이드 매트릭스에서 입력해도 조용히 무시됐습니다)
+        man = _clean_manual_bar(manual_bars.get(f"{date_str}_{rid}"), date_str, rid)
+        if man:
+            result[rid] = {'occ': occ, 'bar': man, 'original_bar': determine_bar(date_obj, occ, av),
+                           'price': table.get(man, 0), 'is_manual': True, 'capped': False}
+            continue
+
+        own_bar = determine_bar(date_obj, occ, av)
+        base_p = table.get(own_bar, list(table.values())[-1])
+        # V2: 희소성은 OCC 래더(SCARCITY_BY_AVAIL)에서 이미 반영 → 정액 가산 중복 제거
+        scarcity = 0 if _PRICING_V2 else compute_scarcity_premium(av, date_obj)
+        raw_p = base_p + scarcity
+        final_p = min(raw_p, cap) if cap else raw_p
+        eff_bar = price_to_effective_bar(rid, final_p) or own_bar
+        result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': own_bar, 'price': final_p,
+                       'is_manual': False, 'capped': bool(cap and raw_p > cap)}
+
+    # Step 6. FFD: FDE 연동 (FDE+20k 플로어) + 자체 재고 반영
     m_ffd = date_rows[date_rows['RoomID'] == "FFD"]
     if not m_ffd.empty:
-        try:
-            av_ffd = float(m_ffd.iloc[0]['Available']) if pd.notna(m_ffd.iloc[0]['Available']) else 0.0
-        except Exception:
-            av_ffd = 0.0
-        tot_ffd = m_ffd.iloc[0]['Total']
-        occ_ffd = ((tot_ffd - av_ffd) / tot_ffd * 100) if tot_ffd > 0 else 0
-        scarcity_ffd = compute_scarcity_premium(av_ffd, date_obj)
-        ffd_floor = fde_p + 20000 + scarcity_ffd
-        ffd_bar = snap_to_bar_ceil(FFD_TABLE, ffd_floor)
-        ffd_price = FFD_TABLE.get(ffd_bar, FFD_TABLE["BAR0"])
-        result["FFD"] = {'occ': occ_ffd, 'bar': ffd_bar, 'original_bar': ffd_bar, 'price': ffd_price, 'is_manual': False}
+        occ_ffd, av_ffd, tot_ffd, _ok = normalize_inventory(
+            m_ffd.iloc[0]['Available'], m_ffd.iloc[0]['Total'], date_str, "FFD", fallback_occ=hotel_occ)
+        man = _clean_manual_bar(manual_bars.get(f"{date_str}_FFD"), date_str, "FFD")
+        if man:
+            result["FFD"] = {'occ': occ_ffd, 'bar': man, 'original_bar': man,
+                             'price': FFD_TABLE.get(man, 0), 'is_manual': True, 'capped': False}
+        elif not _PRICING_V2:
+            scarcity_ffd = compute_scarcity_premium(av_ffd, date_obj)
+            ffd_bar = snap_to_bar_ceil(FFD_TABLE, fde_p + 20000 + scarcity_ffd)
+            result["FFD"] = {'occ': occ_ffd, 'bar': ffd_bar, 'original_bar': ffd_bar,
+                             'price': FFD_TABLE.get(ffd_bar, FFD_TABLE["BAR0"]),
+                             'is_manual': False, 'capped': False}
+        else:
+            # 연동 기준 BAR = FDE+20,000 플로어
+            link_bar = snap_to_bar_ceil(FFD_TABLE, fde_p + 20000)
+            link_idx = bar_rank(link_bar) or 0
+            # 자체 재고 신호를 ±LINK_FLEX_STEPS 범위에서 반영
+            own_idx = bar_rank(determine_bar(date_obj, occ_ffd, av_ffd))
+            idx = link_idx
+            if own_idx is not None:
+                delta = max(-LINK_FLEX_STEPS, min(LINK_FLEX_STEPS, own_idx - link_idx))
+                idx = max(0, min(len(BAR_ORDER) - 1, link_idx + delta))
+            # FDE 역전 금지 — FFD 가격이 FDE 이하로 내려가면 한 단계씩 올림
+            while idx > 0 and FFD_TABLE.get(BAR_ORDER[idx], 0) <= fde_p:
+                idx -= 1
+            ffd_bar = BAR_ORDER[idx]
+            result["FFD"] = {'occ': occ_ffd, 'bar': ffd_bar, 'original_bar': link_bar,
+                             'price': FFD_TABLE.get(ffd_bar, FFD_TABLE["BAR0"]),
+                             'is_manual': False, 'capped': False}
 
-    # Step 7. FPT/PPV: FDB BAR 연동 (FDB 오르면 같이 오름, 역전 없음)
+    # Step 7. FPT/PPV: FDB BAR 연동 + 자체 재고 반영
+    # (주석 정정: 기존 요금표 주석은 FPT를 '호텔 전체 OCC 기준'이라 적었지만
+    #  구현은 FDB 연동입니다. 실제 동작에 맞춰 FDB 연동으로 문서화합니다.)
     fdb_bar = result.get("FDB", {}).get("bar", hotel_bar)
-    for rid, table, cap in [("FPT", FPT_TABLE, 900000), ("PPV", PPV_TABLE, 2490000)]:
+    fdb_idx = bar_rank(fdb_bar) or 0
+    for rid, table in [("FPT", FPT_TABLE), ("PPV", PPV_TABLE)]:
         m = date_rows[date_rows['RoomID'] == rid]
         if m.empty:
             continue
-        try:
-            av = float(m.iloc[0]['Available']) if pd.notna(m.iloc[0]['Available']) else 0.0
-        except Exception:
-            av = 0.0
-        tot = m.iloc[0]['Total']
-        occ = ((tot - av) / tot * 100) if tot > 0 else 0
-        base_p = table.get(fdb_bar, list(table.values())[-1])
-        scarcity = compute_scarcity_premium(av, date_obj)
-        final_p = min(base_p + scarcity, cap)
-        result[rid] = {'occ': occ, 'bar': fdb_bar, 'original_bar': fdb_bar, 'price': final_p, 'is_manual': False}
+        cap = ROOM_PRICE_CAPS.get(rid)
+        occ, av, tot, _ok = normalize_inventory(
+            m.iloc[0]['Available'], m.iloc[0]['Total'], date_str, rid, fallback_occ=hotel_occ)
+
+        man = _clean_manual_bar(manual_bars.get(f"{date_str}_{rid}"), date_str, rid)
+        if man:
+            result[rid] = {'occ': occ, 'bar': man, 'original_bar': fdb_bar,
+                           'price': table.get(man, 0), 'is_manual': True, 'capped': False}
+            continue
+
+        link_bar = fdb_bar
+        if _PRICING_V2:
+            # 자체 재고 신호를 ±LINK_FLEX_STEPS 범위에서 반영
+            own_idx = bar_rank(determine_bar(date_obj, occ, av))
+            if own_idx is not None:
+                delta = max(-LINK_FLEX_STEPS, min(LINK_FLEX_STEPS, own_idx - fdb_idx))
+                link_bar = BAR_ORDER[max(0, min(len(BAR_ORDER) - 1, fdb_idx + delta))]
+
+        base_p = table.get(link_bar, list(table.values())[-1])
+        scarcity = 0 if _PRICING_V2 else compute_scarcity_premium(av, date_obj)
+        raw_p = base_p + scarcity
+        final_p = min(raw_p, cap) if cap else raw_p
+        # cap에 걸려 요금표보다 낮아진 경우 표시 BAR를 실제 가격에 맞춰 역산
+        # (기존에는 'BAR0P 표시 / 실가 900,000' 같은 불일치가 발생)
+        eff_bar = link_bar
+        if cap and raw_p > cap:
+            eff_bar = price_to_effective_bar(rid, final_p) or link_bar
+        result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': fdb_bar, 'price': final_p,
+                       'is_manual': False, 'capped': bool(cap and raw_p > cap)}
 
     _price_cache[cache_key] = result
     return result
 
 
+def compute_final_prices_for_date(date_obj, curr_df, manual_bars=None, applied_rates=None):
+    """예외(applied_rates)로 고정한 BAR까지 반영한 '최종' 가격.
+
+    ※ 기존에는 예외 셀의 가격을 get_bar_price(rid, bar)로 요금표에서 직접 읽어
+      역전방지·상한·연동을 모두 우회했습니다. 그래서 예외로 HDF에 BAR8을 지정하면
+      HDF 420,000 < FDE 482,000 처럼 실제 요금 역전이 발생했습니다.
+      → 예외 BAR를 수동 오버라이드와 같은 경로로 주입해 가드레일을 통과시킵니다.
+    '직접가격'(숫자) 예외는 관리자가 지정한 절대값이므로 여기서 다루지 않습니다.
+    """
+    ov = dict(manual_bars or {})
+    date_str = date_obj.strftime('%Y-%m-%d')
+    rooms = (applied_rates or {}).get(date_str, {}).get('rooms', {}) or {}
+    for rid, v in rooms.items():
+        s = str(v).strip().upper().replace(" ", "")
+        if is_valid_bar(s):
+            ov[f"{date_str}_{rid}"] = s
+    return compute_all_prices_for_date(date_obj, curr_df, ov)
+
+
 
 def price_to_effective_bar(room_id, price):
     """조정된 가격에서 가장 가까운 실효 BAR 코드를 역산.
-    price 이하인 BAR 중 가장 높은 가격의 BAR 반환 (BAR0 제외).
-    예) HDF 749,000 → BAR2(747,000)"""
-    if room_id in DYNAMIC_ROOMS:
-        table = PRICE_TABLE.get(room_id, {})
-    elif room_id == "FPT":
-        table = FPT_TABLE
-    elif room_id == "PPV":
-        table = PPV_TABLE
-    elif room_id == "GDB":
-        table = GDB_TABLE
-    elif room_id == "GDF":
-        table = GDF_TABLE
-    elif room_id == "FFD":
-        table = FFD_TABLE
-    else:
+    price 이하인 BAR 중 가장 비싼 BAR 반환.
+
+    ※ 수정 2건:
+      1) 기존 range(1, 9)는 BAR0/BAR0P를 후보에서 제외했습니다. 그래서 역전방지로
+         BAR0P 가격을 넘어선 HDF(1,001,000)가 'BAR1'로 표시되어 요금과 셀 색상이
+         전부 어긋났습니다. → BAR_ORDER 전체를 후보로 사용.
+      2) 동가 BAR(예: GDB BAR6=BAR7=BAR8=298,000)에서 기존 엄격 비교(p > best)는
+         항상 가장 비싼 쪽(BAR6)을 반환했습니다. → 동가면 저가 BAR를 반환.
+    price가 최고가 BAR보다 높으면 None (호출부에서 계산 BAR를 그대로 사용)."""
+    table = get_room_table(room_id)
+    if not table:
         return None
     best_bar, best_price = None, None
-    for i in range(1, 9):
-        bar = f"BAR{i}"
+    for bar in BAR_ORDER:            # 고가 → 저가 순
         p = table.get(bar)
-        if p is None:
+        if p is None or p > price:
             continue
-        if p <= price:
-            if best_price is None or p > best_price:
-                best_price, best_bar = p, bar
+        if best_price is None or p > best_price:
+            best_price, best_bar = p, bar
+        elif p == best_price:
+            best_bar = bar           # 동가면 더 저렴한(뒤쪽) BAR 채택
     return best_bar
 
 
 def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
+    """반환: (occ, bar, price, is_manual)
+
+    ※ 수정: 기존 `except Exception: pass` 는 모든 오류를 조용히 삼키고
+      역전방지·연동·희소성이 전부 빠진 폴백 경로로 넘어갔습니다. 같은 화면에서
+      객실별로 요금 체계가 달라져도 아무 표시가 없었습니다.
+      → 오류를 _logic_errors에 기록해 화면 상단에 노출합니다.
+    """
+    date_str = date_obj.strftime('%Y-%m-%d')
+
     # --- 통합 산출 경로 (session_state에 today_df 있을 때) ---
     try:
         curr_df = st.session_state.get('today_df', pd.DataFrame())
         if not curr_df.empty:
             manual_bars = dict(st.session_state.get('manual_bars', {}))
             if manual_bar:
-                manual_bars[f"{date_obj.strftime('%Y-%m-%d')}_{room_id}"] = manual_bar
+                manual_bars[f"{date_str}_{room_id}"] = manual_bar
             all_prices = compute_all_prices_for_date(date_obj, curr_df, manual_bars)
             if room_id in all_prices:
                 info = all_prices[room_id]
                 return info['occ'], info['bar'], info['price'], info.get('is_manual', False)
-    except Exception:
-        pass
+    except Exception as e:
+        msg = f"{date_str} {room_id}: 통합 산출 실패 → 폴백 경로 사용 ({type(e).__name__}: {e})"
+        if msg not in _logic_errors:
+            _logic_errors.append(msg)
 
-    # --- Fallback ---
-    type_code, season, is_weekend = get_season_details(date_obj)
-    try:
-        current_avail = float(avail) if pd.notna(avail) else 0.0
-    except Exception:
-        current_avail = 0.0
-    occ = ((total - current_avail) / total * 100) if total > 0 else 0
+    # --- Fallback (역전방지·연동 없음 — 통합 경로 실패 시에만 도달) ---
+    occ, av_eff, tot_eff, _ok = normalize_inventory(avail, total, date_str, room_id)
 
-    if manual_bar:
-        bar = manual_bar
-        if room_id in DYNAMIC_ROOMS:
-            price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-        elif room_id == "FPT":
-            price = FPT_TABLE.get(bar, 0)
-        elif room_id == "PPV":
-            price = PPV_TABLE.get(bar, 0)
-        elif room_id == "GDB":
-            price = GDB_TABLE.get(bar, 0)
-        elif room_id == "GDF":
-            price = GDF_TABLE.get(bar, 0)
-        elif room_id == "FFD":
-            price = FFD_TABLE.get(bar, 0)
-        else:
-            price = 0
-        return occ, bar, price, True
+    table = get_room_table(room_id)
+    man = _clean_manual_bar(manual_bar, date_str, room_id)
+    if man:
+        return occ, man, table.get(man, 0), True
 
-    if room_id in DYNAMIC_ROOMS:
-        bar = determine_bar(date_obj, occ)
-        price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-    elif room_id == "FPT":
-        # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
-        bar = determine_bar(date_obj, occ)
-        price = FPT_TABLE.get(bar, 500000)
-    elif room_id == "PPV":
-        # fallback: curr_df 없을 때 FDB BAR 참조 불가 → hotel OCC 근사치 사용
-        bar = determine_bar(date_obj, occ)
-        price = PPV_TABLE.get(bar, 1290000)
-    elif room_id == "GDB":
-        bar = determine_bar(date_obj, occ)
-        price = GDB_TABLE.get(bar, 298000)
-    elif room_id == "GDF":
-        bar = determine_bar(date_obj, occ)
-        price = GDF_TABLE.get(bar, 392000)
-    elif room_id == "FFD":
-        bar = determine_bar(date_obj, occ)
-        price = FFD_TABLE.get(bar, 372000)
-    else:
-        bar = type_code
-        price = 0
+    if not table:
+        type_code, _season, _is_weekend = get_season_details(date_obj)
+        return occ, type_code, 0, False
+
+    bar = determine_bar(date_obj, occ, av_eff)
+    price = table.get(bar, table.get(BAR_ORDER[-1], 0))
+    cap = ROOM_PRICE_CAPS.get(room_id)
+    if cap:
+        price = min(price, cap)
     return occ, bar, price, False
 
 
@@ -583,8 +888,10 @@ def validate_price_tables():
         if bar0 is not None and bar1 is not None and bar0 <= bar1:
             warnings.append(f"🚨 {room}: BAR0({bar0:,}) ≤ BAR1({bar1:,}) — 수동인상가가 BAR1보다 작거나 같음!")
 
-    # FPT_TABLE / PPV_TABLE: BAR1>BAR2>...>BAR8 단조 감소 확인
-    for tname, tbl in [("FPT_TABLE", FPT_TABLE), ("PPV_TABLE", PPV_TABLE)]:
+    # ※ 수정: 기존에는 FPT/PPV만 검사해 GDB/GDF/FFD의 동가·역전을 놓쳤습니다.
+    for tname, tbl in [("FPT_TABLE", FPT_TABLE), ("PPV_TABLE", PPV_TABLE),
+                       ("GDB_TABLE", GDB_TABLE), ("GDF_TABLE", GDF_TABLE),
+                       ("FFD_TABLE", FFD_TABLE)]:
         prev_price, prev_bar = None, None
         for i in range(1, 9):
             bar = f"BAR{i}"
@@ -592,9 +899,22 @@ def validate_price_tables():
             if p is None:
                 warnings.append(f"⚠️ {tname}: {bar} 가격 누락")
                 continue
-            if prev_price is not None and p >= prev_price:
-                warnings.append(f"🚨 {tname}: {prev_bar}({prev_price:,}) ≤ {bar}({p:,}) — 가격 역전!")
+            if prev_price is not None and p == prev_price:
+                warnings.append(f"⚠️ {tname}: {prev_bar}와 {bar}가 동일 가격({p:,}) — OCC가 올라도 요금이 안 움직입니다")
+            elif prev_price is not None and p > prev_price:
+                warnings.append(f"🚨 {tname}: {prev_bar}({prev_price:,}) < {bar}({p:,}) — 가격 역전!")
             prev_price, prev_bar = p, bar
+
+    # ※ 신규: 요금 상한(cap)과 요금표의 정합성 — cap보다 비싼 BAR는 도달 불가 구간
+    for rid, cap in ROOM_PRICE_CAPS.items():
+        tbl = get_room_table(rid)
+        unreachable = [b for b in BAR_ORDER if b in tbl and tbl[b] > cap]
+        if unreachable:
+            warnings.append(
+                f"⚠️ {rid}: 요금 상한 {cap:,}원 때문에 {', '.join(unreachable)} 구간에 "
+                f"도달할 수 없습니다 (최고 {tbl[unreachable[0]]:,}원). "
+                f"상한을 올릴지 / 요금표 상단을 정리할지 결정이 필요합니다."
+            )
     return warnings
 
 
@@ -709,12 +1029,25 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 is_applied = applied_bar is not None
                 # 가격 직접 오버라이드(GDB/GDF/FFD 숫자 문자열) vs BAR 오버라이드 구분
                 _is_price_ovr = is_applied and str(applied_bar).strip().isdigit()
+                _guard_lifted = 0
                 if _is_price_ovr:
                     final_bar = bar          # 색상은 계산 BAR 기준
                     final_price = int(str(applied_bar).strip())
                 elif is_applied:
                     final_bar = applied_bar
-                    final_price = get_bar_price(rid, final_bar) or base_price
+                    # ※ 수정: 예외 BAR 가격을 요금표에서 직접 읽으면 역전방지·상한·연동을
+                    #   모두 우회해 실제 요금 역전이 발생했습니다(예: 예외 HDF BAR8
+                    #   420,000 < FDE 482,000). 가드레일을 통과한 값을 사용합니다.
+                    _table_price = get_bar_price(rid, final_bar) or base_price
+                    try:
+                        _gp = compute_final_prices_for_date(
+                            d, current_df, st.session_state.get('manual_bars', {}), applied_rates
+                        ).get(rid, {}).get('price')
+                    except Exception:
+                        _gp = None
+                    final_price = _gp if _gp else _table_price
+                    if _gp and _gp > _table_price:
+                        _guard_lifted = _gp - _table_price
                 else:
                     final_bar = bar
                     final_price = base_price
@@ -737,6 +1070,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                                   f"<span style='color:#c62828;'>▲</span><b>{final_bar}</b>")
                 else:
                     _bar_disp2 = f"<b>{final_bar}</b>"
+                if _guard_lifted:
+                    # 예외 BAR 표가보다 역전방지로 올라간 경우 표시
+                    _bar_disp2 += (f"<span style='color:#c62828;font-size:8px;' "
+                                   f"title='역전방지로 +{_guard_lifted:,}원 상향'>▲역전방지</span>")
                 if is_applied:
                     if needs_review:
                         style += f"background-color: {bg}; border: 3px solid #FF6F00; font-weight: bold; box-shadow: inset 0 0 0 2px #FFD54F;"
@@ -899,6 +1236,30 @@ def get_bar_price(room_id, bar):
         return FFD_TABLE.get(bar, 0)
     return 0
 
+
+def get_applied_price(room_id, applied_bar, date_obj, current_df, applied_rates, fallback=0):
+    """예외(applied_rates)로 지정된 셀의 최종 요금.
+
+    ※ 신설 이유: 화면 6곳에서 get_bar_price(rid, bar)로 요금표를 직접 읽어
+      역전방지·상한·연동을 우회했습니다. 그 결과
+        - 예외 HDF BAR8(420,000) < FDE 권장(482,000) → 실제 요금 역전
+        - '직접가격'(숫자) 예외는 get_bar_price가 0을 반환 → 0원 표시
+      두 문제가 있었습니다. 모든 화면이 이 함수를 쓰도록 통일합니다.
+    """
+    s = str(applied_bar).strip()
+    if s.isdigit():                      # 직접가격 — 관리자가 지정한 절대값
+        return int(s)
+    bar = s.upper().replace(" ", "")
+    table_p = get_bar_price(room_id, bar) or fallback
+    try:
+        p = compute_final_prices_for_date(
+            date_obj, current_df, st.session_state.get('manual_bars', {}), applied_rates
+        ).get(room_id, {}).get('price')
+    except Exception:
+        p = None
+    return p if p else table_p
+
+
 # =============================================================================
 # 4-A-1-B. 예외 자동 갱신 (신규)
 # =============================================================================
@@ -941,7 +1302,11 @@ def auto_update_stale_exceptions(current_df):
         date_log = []
 
         for rid, exc_bar in existing_rooms.items():
-            if rid not in DYNAMIC_ROOMS:
+            # ※ 수정: 기존에는 `if rid not in DYNAMIC_ROOMS: continue` 로
+            #   GDB·GDF·FFD·FPT·PPV의 예외가 절대 자동 갱신되지 않았습니다.
+            #   한 번 걸면 매진되든 말든 영구 고정 → "매진인데 요금이 낮다"의 원인.
+            #   '직접가격'(숫자) 예외는 관리자 지정 절대값이므로 그대로 유지합니다.
+            if rid not in ALL_ROOMS or str(exc_bar).strip().isdigit():
                 new_rooms[rid] = exc_bar
                 continue
 
@@ -953,7 +1318,8 @@ def auto_update_stale_exceptions(current_df):
             _, rec_bar, rec_price, _ = get_final_values(
                 rid, d, row.iloc[0]['Available'], row.iloc[0]['Total']
             )
-            exc_price = get_bar_price(rid, exc_bar)
+            # 예외가도 가드레일을 통과한 값으로 비교 (한쪽만 보정하면 비교가 왜곡됨)
+            exc_price = get_applied_price(rid, exc_bar, d, current_df, applied)
 
             if rec_price > exc_price:
                 new_rooms[rid] = rec_bar
@@ -966,7 +1332,7 @@ def auto_update_stale_exceptions(current_df):
         if changed:
             rec_at_apply = {}
             for rid in new_rooms:
-                if rid in DYNAMIC_ROOMS:
+                if rid in ALL_ROOMS:
                     row = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
                     if not row.empty:
                         _, r, _, _ = get_final_values(
@@ -1333,7 +1699,8 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
                                         f"<span style='font-size:8px;color:#555;'>권장:{rec_price:,}</span>")
                     else:
                         ovr_bar = str(fixed_override).strip().upper()
-                        ovr_price_f = get_bar_price(rid, ovr_bar) or rec_price
+                        ovr_price_f = get_applied_price(rid, ovr_bar, d, current_df,
+                                                        applied_rates, fallback=rec_price)
                         cell_content = (f"⭐ <b>{ovr_bar}</b><br>"
                                         f"<span style='font-size:9px;color:#1B5E20;'>{ovr_price_f:,}</span><br>"
                                         f"<span style='font-size:8px;color:#555;'>권장:{rec_bar}</span>")
@@ -1835,19 +2202,27 @@ def render_apply_rate_ui(current_df, applied_rates):
         )
 
         # 파싱 → applied_input에 병합
+        _bad_price_inputs = []
         for _, row in edited_price_fx.iterrows():
             rid = row["객실"]
             for d in selected_dates:
                 lbl = f"{d.strftime('%m-%d')}({WEEKDAYS_KR[d.weekday()]})"
                 val = row.get(lbl)
                 if val is not None and pd.notna(val):
+                    # ※ 수정: 기존에는 파싱 실패를 조용히 버려서 입력한 가격이
+                    #   사라진 이유를 알 수 없었습니다.
                     try:
                         pval = int(float(val))
-                        if pval > 0:
-                            if d not in applied_input: applied_input[d] = {}
-                            applied_input[d][rid] = str(pval)
-                    except Exception:
-                        pass
+                    except (TypeError, ValueError):
+                        _bad_price_inputs.append(f"{rid} {lbl}: '{val}'")
+                        continue
+                    if pval > 0:
+                        if d not in applied_input: applied_input[d] = {}
+                        applied_input[d][rid] = str(pval)
+                    else:
+                        _bad_price_inputs.append(f"{rid} {lbl}: '{val}' (0 이하)")
+        if _bad_price_inputs:
+            st.warning("⚠️ 숫자로 읽을 수 없어 무시된 직접가격 입력: " + ", ".join(_bad_price_inputs[:15]))
 
         for _, row in edited_bar_fx.iterrows():
             rid = row["객실"]
@@ -2019,7 +2394,8 @@ def render_channel_sale_table(current_df, prev_df, ch_name, applied_rates, prev_
             applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
             is_applied = applied_bar is not None
             final_bar = applied_bar if is_applied else rec_bar
-            base_price = get_bar_price(rid, final_bar)
+            base_price = (get_applied_price(rid, final_bar, d, current_df, applied_rates)
+                          if is_applied else get_bar_price(rid, final_bar))
 
             prev_rec_bar = None
             if prev_df is not None and not prev_df.empty:
@@ -2170,7 +2546,8 @@ def render_tomorrow_preview(current_df, applied_rates):
                 applied_bar = applied_info.get('rooms', {}).get(rid)
                 if applied_bar:
                     final_bar = applied_bar
-                    final_price = get_bar_price(rid, applied_bar)
+                    final_price = get_applied_price(rid, applied_bar, d, current_df,
+                                                    applied_rates, fallback=rec_price)
                     star = "⭐"
                     color = "#D32F2F"
                 else:
@@ -2312,7 +2689,8 @@ def render_mobile_card_view(current_df, applied_rates):
             applied_bar = applied_info.get('rooms', {}).get(rid)
             if applied_bar:
                 final_bar = applied_bar
-                final_price = get_bar_price(rid, applied_bar)
+                final_price = get_applied_price(rid, applied_bar, d, current_df,
+                                                applied_rates, fallback=rec_price)
                 mark = "⭐"
                 badge_bg = "#FFEBEE"
                 badge_color = "#C62828"
@@ -2545,7 +2923,8 @@ def render_bar_calendar_table(current_df, applied_rates):
             applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid)
             bar = applied_bar if applied_bar else (rec_all.get(rid) or {}).get('bar', '-')
             is_ovr = bool(applied_bar)
-            price = get_bar_price(rid, bar) if (bar and bar != '-') else 0
+            price = (get_applied_price(rid, bar, d, current_df, applied_rates)
+                     if is_ovr else ((rec_all.get(rid) or {}).get('price', 0) or 0))
             price_str = f"{price // 1000}k" if price else "-"
             bg = BAR_GRADIENT_COLORS.get(bar, "#EEE")
             tc = "white" if bar in ("BAR0P", "BAR0", "BAR1", "BAR2", "BAR3") else "#333"
@@ -2568,6 +2947,129 @@ def render_bar_calendar_table(current_df, applied_rates):
     leg.append('<span style="border:2.5px solid #FF8F00;padding:3px 8px;border-radius:4px;font-size:11px;">주황 테두리 = 오버라이드</span>')
     leg.append('</div>')
     st.markdown("".join(leg), unsafe_allow_html=True)
+
+
+# =============================================================================
+# 4-Z. 구/신 요금 곡선 비교 (2단계 안전장치)
+# =============================================================================
+def compute_prices_both_versions(current_df, manual_bars):
+    """전 날짜·전 객실에 대해 구 곡선(V1)과 신 곡선(V2) 요금을 동시 산출.
+    반환: (DataFrame, 요약dict)"""
+    global _PRICING_V2
+    dates = sorted(current_df['Date'].unique())
+    saved = _PRICING_V2
+    out = {}
+    try:
+        for ver, flag in (("v1", False), ("v2", True)):
+            _PRICING_V2 = flag
+            _price_cache.clear()
+            for d in dates:
+                try:
+                    res = compute_all_prices_for_date(d, current_df, manual_bars)
+                except Exception:
+                    continue
+                for rid, info in res.items():
+                    out.setdefault((d, rid), {})[ver] = info
+    finally:
+        _PRICING_V2 = saved
+        _price_cache.clear()
+
+    rows = []
+    for (d, rid), v in sorted(out.items(), key=lambda x: (x[0][0], ALL_ROOMS.index(x[0][1]) if x[0][1] in ALL_ROOMS else 99)):
+        a, b = v.get("v1"), v.get("v2")
+        if not a or not b:
+            continue
+        rows.append({
+            "날짜": d.strftime('%Y-%m-%d'),
+            "요일": WEEKDAYS_KR[d.weekday()],
+            "객실": rid,
+            "OCC(%)": round(b.get('occ', 0), 0),
+            "구BAR": a.get('bar'),
+            "구요금": int(a.get('price') or 0),
+            "신BAR": b.get('bar'),
+            "신요금": int(b.get('price') or 0),
+            "차액": int((b.get('price') or 0) - (a.get('price') or 0)),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df, {}
+    df["변동률(%)"] = (df["차액"] / df["구요금"].replace(0, pd.NA) * 100).round(1)
+    summary = {
+        "총 셀": len(df),
+        "변경 셀": int((df["차액"] != 0).sum()),
+        "인상 셀": int((df["차액"] > 0).sum()),
+        "인하 셀": int((df["차액"] < 0).sum()),
+        "구 평균요금": int(df["구요금"].mean()),
+        "신 평균요금": int(df["신요금"].mean()),
+    }
+    summary["평균 변동"] = summary["신 평균요금"] - summary["구 평균요금"]
+    summary["평균 변동률(%)"] = round(
+        summary["평균 변동"] / summary["구 평균요금"] * 100, 1) if summary["구 평균요금"] else 0
+    return df, summary
+
+
+def render_pricing_compare_ui(current_df):
+    """구/신 요금 곡선 비교 패널 — 곡선을 바꾸기 전 실제 데이터로 영향 확인."""
+    with st.expander("🔬 구/신 요금 곡선 비교 (실제 업로드 데이터 기준)", expanded=False):
+        st.caption(
+            f"현재 요금 로직: **{'신(V2)' if _PRICING_V2 else '구(V1)'}** — "
+            f"코드 상단 `_PRICING_V2` 값으로 전환합니다. "
+            f"아래 표는 같은 재고 데이터에 두 곡선을 각각 적용한 결과입니다."
+        )
+        if current_df.empty:
+            st.info("데이터를 업로드하면 비교표가 나타납니다.")
+            return
+        if not st.button("🔍 비교 실행", use_container_width=True, key="run_pricing_compare"):
+            st.caption("※ 전 날짜 × 전 객실을 두 번 계산하므로 버튼을 눌러야 실행됩니다.")
+            return
+
+        df, summ = compute_prices_both_versions(current_df, dict(st.session_state.get('manual_bars', {})))
+        if df.empty:
+            st.warning("비교할 데이터가 없습니다.")
+            return
+
+        c = st.columns(4)
+        c[0].metric("평균 요금", f"{summ['신 평균요금']:,}원",
+                    f"{summ['평균 변동']:+,}원 ({summ['평균 변동률(%)']:+}%)")
+        c[1].metric("변경 셀", f"{summ['변경 셀']:,} / {summ['총 셀']:,}")
+        c[2].metric("인상", f"{summ['인상 셀']:,}건")
+        c[3].metric("인하", f"{summ['인하 셀']:,}건")
+
+        # 객실별 요약
+        by_room = df.groupby("객실", as_index=False).agg(
+            구평균=("구요금", "mean"), 신평균=("신요금", "mean"), 평균차액=("차액", "mean"))
+        for col in ("구평균", "신평균", "평균차액"):
+            by_room[col] = by_room[col].round(0).astype(int)
+        by_room["변동률(%)"] = (by_room["평균차액"] / by_room["구평균"].replace(0, pd.NA) * 100).round(1)
+        by_room["객실"] = pd.Categorical(by_room["객실"], categories=ALL_ROOMS, ordered=True)
+        st.markdown("**객실별 평균 영향**")
+        st.dataframe(by_room.sort_values("객실"), use_container_width=True, hide_index=True)
+
+        # 날짜별 요약
+        by_date = df.groupby(["날짜", "요일"], as_index=False).agg(
+            구평균=("구요금", "mean"), 신평균=("신요금", "mean"))
+        by_date["평균차액"] = (by_date["신평균"] - by_date["구평균"]).round(0).astype(int)
+        by_date["변동률(%)"] = (by_date["평균차액"] / by_date["구평균"].replace(0, pd.NA) * 100).round(1)
+        for col in ("구평균", "신평균"):
+            by_date[col] = by_date[col].round(0).astype(int)
+        st.markdown("**날짜별 평균 영향**")
+        st.dataframe(by_date, use_container_width=True, hide_index=True)
+
+        only_changed = st.checkbox("변경된 셀만 보기", value=True, key="cmp_only_changed")
+        detail = df[df["차액"] != 0] if only_changed else df
+        st.markdown(f"**셀 단위 상세 ({len(detail):,}건)**")
+        st.dataframe(detail, use_container_width=True, hide_index=True, height=420)
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf) as w:
+            df.to_excel(w, index=False, sheet_name="셀상세")
+            by_room.sort_values("객실").to_excel(w, index=False, sheet_name="객실별")
+            by_date.to_excel(w, index=False, sheet_name="날짜별")
+        st.download_button("📥 비교 결과 엑셀 다운로드", data=buf.getvalue(),
+                           file_name=f"요금곡선비교_{date.today().strftime('%Y%m%d')}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_pricing_compare")
+
 
 def render_audit_log_ui():
     """변경 이력 조회 화면"""
@@ -2731,13 +3233,66 @@ def render_restore_point_ui():
 # 5. 파서 및 DB 로직
 # =============================================================================
 def robust_date_parser(d_val):
-    if pd.isna(d_val): return None
+    """엑셀 헤더의 날짜 값을 date로 변환.
+
+    ※ 수정 3건 (기존 버그):
+      1) 연도가 date(2026, ...)로 하드코딩되어 2027년 예약은 전부 오답이었습니다.
+         → 오늘 기준 -180일 ~ +400일 창에 들어가는 연도를 추론합니다.
+         (12월 업로드분의 1월 날짜가 작년으로 잡히는 문제도 함께 해결)
+      2) 엑셀 셀이 '진짜 날짜 서식'이면 Timestamp가 되고, str()이
+         '2026-08-18 00:00:00' → 정규식이 '26-08'을 잡아 date(2026, 26, 8) →
+         ValueError → None. 해당 날짜 열이 통째로 누락됐습니다.
+         → datetime/date/Timestamp를 먼저 그대로 받습니다.
+      3) 'YYYY-MM-DD' 문자열도 같은 이유로 None이었습니다. → 전체 파싱 우선 시도.
+    """
+    if d_val is None:
+        return None
     try:
-        if isinstance(d_val, (int, float)): return (pd.to_datetime('1899-12-30') + pd.to_timedelta(d_val, 'D')).date()
-        s = str(d_val).strip().replace('.', '-').replace('/', '-').replace(' ', '')
-        match = re.search(r'(\d{1,2})-(\d{1,2})', s)
-        if match: return date(2026, int(match.group(1)), int(match.group(2)))
-    except: pass
+        if pd.isna(d_val):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    # 1) 날짜/시각 객체는 그대로
+    if isinstance(d_val, pd.Timestamp):
+        return d_val.date()
+    if isinstance(d_val, datetime):
+        return d_val.date()
+    if isinstance(d_val, date):
+        return d_val
+
+    # 2) 엑셀 시리얼 번호
+    if isinstance(d_val, (int, float)) and not isinstance(d_val, bool):
+        try:
+            return (pd.to_datetime('1899-12-30') + pd.to_timedelta(float(d_val), 'D')).date()
+        except (ValueError, OverflowError):
+            return None
+
+    s = str(d_val).strip()
+    if not s:
+        return None
+
+    # 3) 완전한 날짜 문자열 우선 (YYYY-MM-DD, YYYY.MM.DD, 2026년 8월 18일 등)
+    ym = re.search(r'(20\d{2})[.\-/년]\s*(\d{1,2})[.\-/월]\s*(\d{1,2})', s)
+    if ym:
+        try:
+            return date(int(ym.group(1)), int(ym.group(2)), int(ym.group(3)))
+        except ValueError:
+            return None
+
+    # 4) MM-DD 형식 → 연도 추론
+    s2 = s.replace('.', '-').replace('/', '-').replace(' ', '')
+    m = re.search(r'(\d{1,2})-(\d{1,2})', s2)
+    if not m:
+        return None
+    mo, dy = int(m.group(1)), int(m.group(2))
+    for cand_year in (TODAY.year, TODAY.year + 1, TODAY.year - 1):
+        try:
+            c = date(cand_year, mo, dy)
+        except ValueError:
+            continue
+        if -180 <= (c - TODAY).days <= 400:
+            return c
     return None
 
 
@@ -3219,6 +3774,7 @@ with st.sidebar:
 # =============================================================================
 if files:
     new_extracted = []
+    _parse_failed_dates = []   # 날짜로 못 읽은 헤더 값 (조용한 열 누락 방지)
     ROW_MAP = {4: "GDB", 5: "GDF", 6: "FDB", 7: "FDE", 8: "FPT", 9: "FFD", 10: "HDP", 11: "HDT", 12: "HDF", 13: "PPV"}
 
     for f in files:
@@ -3226,11 +3782,19 @@ if files:
         df_raw = pd.read_excel(f, header=None)
         dates_raw = df_raw.iloc[2, 2:].values
 
+        # 헤더 날짜를 한 번만 파싱해두고 실패분을 기록
+        parsed_dates = []
+        for d_val in dates_raw:
+            d_obj = robust_date_parser(d_val)
+            parsed_dates.append(d_obj)
+            if d_obj is None and pd.notna(d_val) and str(d_val).strip():
+                if str(d_val) not in _parse_failed_dates:
+                    _parse_failed_dates.append(str(d_val))
+
         for r_idx, rid in ROW_MAP.items():
             if r_idx < len(df_raw):
                 tot = pd.to_numeric(df_raw.iloc[r_idx, 1], errors='coerce')
-                for d_val, av in zip(dates_raw, df_raw.iloc[r_idx, 2:].values):
-                    d_obj = robust_date_parser(d_val)
+                for d_obj, av in zip(parsed_dates, df_raw.iloc[r_idx, 2:].values):
                     if d_obj is None: continue
                     new_extracted.append({"Date": d_obj, "RoomID": rid, "Available": pd.to_numeric(av, errors='coerce'), "Total": tot, "Tag": date_tag})
 
@@ -3257,6 +3821,30 @@ if files:
         if k.startswith("_review_map_cache_"):
             del st.session_state[k]
 
+    # ── 신규: 업로드 데이터 무결성 점검 ──────────────────────────────
+    # 기존에는 전체객실 결측 → OCC 0%(최저가), 잔여객실 결측 → OCC 100%(최고가)로
+    # 조용히 단정해 오요금이 나갔습니다. 이제 여기서 먼저 표면화합니다.
+    _bad_rows = validate_inventory_df(st.session_state.today_df)
+    if _bad_rows:
+        st.error(f"🚨 재고 데이터 이상 {len(_bad_rows)}건 — 해당 셀은 호텔 전체 OCC로 대체 계산됩니다. "
+                 f"원본 리포트를 확인하세요.")
+        with st.expander(f"📋 이상 데이터 상세 ({len(_bad_rows)}건)", expanded=True):
+            _bad_df = pd.DataFrame(
+                [{"날짜": d.strftime('%Y-%m-%d') if hasattr(d, 'strftime') else str(d),
+                  "객실": rid, "사유": why} for d, rid, why in _bad_rows]
+            )
+            st.dataframe(_bad_df, use_container_width=True, hide_index=True)
+    else:
+        st.success(f"✅ 재고 데이터 무결성 검사 통과 ({len(st.session_state.today_df)}행)")
+
+    # 업로드 파일에서 날짜를 못 읽은 경우 경고 (날짜 열 누락 조용한 실패 방지)
+    if _parse_failed_dates:
+        st.warning(
+            f"⚠️ 날짜로 인식하지 못한 헤더 값 {len(_parse_failed_dates)}건이 있어 해당 열은 "
+            f"제외됐습니다: {', '.join(str(x) for x in _parse_failed_dates[:12])}"
+            + (" …" if len(_parse_failed_dates) > 12 else "")
+        )
+
 # =============================================================================
 # 8. 메인 출력
 # =============================================================================
@@ -3265,6 +3853,34 @@ if not st.session_state.today_df.empty:
 
     if st.session_state.compare_label:
         st.info(f"ℹ️ {st.session_state.compare_label}")
+
+    # ── 신규: 전 날짜 요금 선산출 (캐시 워밍 + 데이터/로직 이슈 수집) ──
+    # 이슈를 화면 하단이 아니라 상단에서 먼저 보여주기 위해 미리 한 번 돌립니다.
+    _mb = dict(st.session_state.get('manual_bars', {}))
+    for _d in sorted(curr['Date'].unique()):
+        try:
+            compute_all_prices_for_date(_d, curr, _mb)
+        except Exception as _e:
+            _msg = f"{_d}: 요금 산출 실패 ({type(_e).__name__}: {_e})"
+            if _msg not in _logic_errors:
+                _logic_errors.append(_msg)
+
+    if _logic_errors:
+        st.error(f"🚨 요금 산출 중 오류 {len(_logic_errors)}건 — 해당 셀은 폴백(역전방지·연동 미적용) "
+                 f"경로로 계산됐습니다. 요금을 신뢰하지 말고 아래 내용을 확인하세요.")
+        with st.expander(f"📋 오류 상세 ({len(_logic_errors)}건)", expanded=True):
+            for _m in _logic_errors[:50]:
+                st.markdown(f"- {_m}")
+
+    if _data_issues:
+        st.warning(f"⚠️ 요금 산출에 영향을 준 데이터 이슈 {len(_data_issues)}건 "
+                   f"(결측/범위초과/무효 오버라이드) — 대체값으로 계산됐습니다.")
+        with st.expander(f"📋 데이터 이슈 상세 ({len(_data_issues)}건)", expanded=False):
+            st.dataframe(
+                pd.DataFrame([{"날짜": k[0], "객실": k[1], "사유": v}
+                              for k, v in sorted(_data_issues.items())]),
+                use_container_width=True, hide_index=True,
+            )
 
     # 모바일 뷰면 카드만 보여주고 끝 (G 개선)
     if st.session_state.get('view_mode', "").startswith("📱"):
@@ -3443,15 +4059,30 @@ if not st.session_state.today_df.empty:
 
             if st.button("💾 전략 적용 및 새로고침", use_container_width=True):
                 new_manual_bars = {}
+                rejected = []
                 for idx, row in edited_matrix.iterrows():
                     rid = row["객실"]
                     for d in dates_list:
                         val = str(row[d.strftime('%m-%d')]).strip()
-                        if val and val.upper() not in ["NONE", "NAN", ""]:
-                            key = f"{d.strftime('%Y-%m-%d')}_{rid}"
-                            new_manual_bars[key] = val.upper()
+                        if not val or val.upper() in ["NONE", "NAN", ""]:
+                            continue
+                        key = f"{d.strftime('%Y-%m-%d')}_{rid}"
+                        # ※ 수정: 기존에는 val.upper()를 그대로 저장했습니다.
+                        #   'BAR 3', '3' 같은 오타가 요금표에서 조회되지 않아
+                        #   판매가 0원으로 나가는 버그가 있었습니다.
+                        cleaned = str(val).strip().upper().replace(" ", "")
+                        if is_valid_bar(cleaned):
+                            new_manual_bars[key] = cleaned
+                        else:
+                            rejected.append(f"{rid} {d.strftime('%m-%d')}: '{val}'")
                 st.session_state.manual_bars = new_manual_bars
-                st.success("수동 오버라이드가 하단 판매가 리포트에 적용되었습니다.")
+                if rejected:
+                    st.error(
+                        f"❌ 유효하지 않은 BAR 코드 {len(rejected)}건은 저장하지 않았습니다 "
+                        f"(사용 가능: {', '.join(BAR_ORDER)})\n\n- " + "\n- ".join(rejected[:20])
+                    )
+                applied_n = len(new_manual_bars)
+                st.success(f"수동 오버라이드 {applied_n}건이 하단 판매가 리포트에 적용되었습니다.")
                 st.rerun()
 
         st.divider()
@@ -3548,6 +4179,11 @@ if not st.session_state.today_df.empty:
 
         st.divider()
 
+        # 구/신 요금 곡선 비교 (2단계 안전장치)
+        render_pricing_compare_ui(st.session_state.today_df)
+
+        st.divider()
+
         # 엑셀 다운로드
         st.subheader("📥 데이터 엑셀 다운로드")
         st.write("현재 화면에 계산된(수동 변경 포함) 최종 데이터 리스트를 엑셀 파일로 다운로드합니다.")
@@ -3570,7 +4206,9 @@ if not st.session_state.today_df.empty:
                 rec_at_apply = applied_rates_export.get(date_str, {}).get('rec_bar_at_apply', {}).get(rid, '')
 
                 if applied_bar:
-                    applied_price = get_bar_price(rid, applied_bar)
+                    applied_price = get_applied_price(rid, applied_bar, d,
+                                                      st.session_state.today_df,
+                                                      applied_rates_export, fallback=rec_price)
                     status = "✅ 적용됨"
                     is_diff = "⚠️ 다름" if applied_bar != rec_bar else "일치"
                     needs_review = "⚠️ 재검토" if (rec_at_apply and rec_at_apply != rec_bar) else "OK"
