@@ -1963,8 +1963,28 @@ def render_applied_vs_recommend_table(current_df, applied_rates, prev_df=None, p
             tooltip = f"title='{memo_text}'" if memo_text else ""
 
             if not applied_bar:
-                style = "border:1px solid #ddd; padding:8px; text-align:center; background-color: #FAFAFA; color: #999;"
-                cell_content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
+                # ※ 수정: 기존에는 적용 BAR가 없으면 무조건 회색 '대기중'으로만 찍혀,
+                #   권장 BAR가 직전 대비 바뀌어도 화면에 전혀 드러나지 않았습니다
+                #   (is_trend_changed를 계산해 툴팁에만 넣고 시각 표시는 누락).
+                #   연동 객실(GDB/GDF/FFD/FPT/PPV)은 오버라이드가 없어도 트렌드를
+                #   색으로 보여줘서, 같은 표 안에서 두 그룹의 규칙이 달랐습니다.
+                #   → 메인 5객실도 동일하게 트렌드를 표시합니다.
+                if is_trend_changed:
+                    _wp, _wc = bar_rank(prev_rec_bar), bar_rank(rec_bar)
+                    _w_up = (_wp is not None and _wc is not None and _wc < _wp)
+                    _w_arrow = "▲" if _w_up else "▼"
+                    _w_border = "#B71C1C" if _w_up else "#0D47A1"
+                    _w_bg = BAR_GRADIENT_COLORS.get(rec_bar, "#FFFFFF")
+                    _w_fg = "#fff" if rec_bar in ("BAR0P", "BAR0", "BAR1", "BAR2", "BAR3") else "#222"
+                    style = (f"border:1.5px solid {_w_border}; padding:8px; text-align:center; "
+                             f"background-color:{_w_bg}; color:{_w_fg}; font-weight:bold;")
+                    cell_content = (f"{_w_arrow} <b style='font-size:13px;'>{rec_bar}</b><br>"
+                                    f"<span style='font-size:9px;opacity:0.75;'>{prev_rec_bar}</span><br>"
+                                    f"<span style='font-size:8px;opacity:0.7;'>대기중</span>")
+                else:
+                    style = ("border:1px solid #ddd; padding:8px; text-align:center; "
+                             "background-color: #FAFAFA; color: #999;")
+                    cell_content = f"<span style='font-size:9px;'>대기중</span><br>{rec_bar}"
             elif needs_review:
                 style = "border:2px solid #FF6F00; padding:8px; text-align:center; background-color: #FFF3E0; color: #E65100; font-weight:bold;"
                 cell_content = f"⚠️ <b>{applied_bar}</b><br><span style='font-size:9px; color:#FF6F00;'>권장→{rec_bar}</span>"
