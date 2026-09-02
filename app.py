@@ -100,6 +100,14 @@ def get_room_table(room_id):
             "GDF": GDF_TABLE, "FFD": FFD_TABLE}.get(room_id, {})
 
 
+def _bar_move_mark(from_bar, to_bar):
+    """BAR 이동 방향 → (화살표, 색). 인덱스가 작을수록 고가."""
+    a, b = bar_rank(from_bar), bar_rank(to_bar)
+    if a is None or b is None or a == b:
+        return "→", "#888"
+    return ("▲", "#c62828") if b < a else ("▼", "#1565C0")
+
+
 def bar_rank(bar):
     """BAR 코드 → BAR_ORDER 인덱스 (0=최고가). 알 수 없으면 None."""
     try:
@@ -847,11 +855,18 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             continue
         occ_bar = bars.get(rid, "BAR8")
         adj_price = fp[rid]
-        # 역전방지로 가격 상향된 경우 유효 BAR 역산
+        # 역전방지로 가격 상향된 경우에만 유효 BAR 역산
+        # (가격이 그대로면 계산 BAR를 유지 — 동가 BAR 오표시 방지)
         if adj_price != base_prices.get(rid, adj_price):
             eff_bar = price_to_effective_bar(rid, adj_price) or occ_bar
         else:
             eff_bar = occ_bar
+        # 수동 오버라이드가 역전방지로 상향된 경우 → 관리자에게 알림
+        # ("내가 넣은 BAR가 안 먹는다"의 실제 원인을 표면화)
+        if is_manuals.get(rid) and adj_price != base_prices.get(rid):
+            _record_issue(date_str, rid,
+                          f"오버라이드 {occ_bar}({base_prices.get(rid, 0):,}원)이 "
+                          f"역전방지로 {adj_price:,}원으로 상향됨")
         result[rid] = {
             'occ': occs.get(rid, 0),
             'bar': eff_bar,
@@ -859,6 +874,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             'price': adj_price,
             'is_manual': is_manuals.get(rid, False),
             'ladder_shrunk': rid in ladder_shrunk,   # 하급 매진임박으로 계단 축소됨
+            'ladder_lifted': adj_price != base_prices.get(rid),
         }
 
     # Step 5. GDB/GDF: 자체 OCC 기반 독립 BAR (그린밸리 펜션형, 메인 계층 무관)
@@ -889,7 +905,12 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         scarcity = 0 if _PRICING_V2 else compute_scarcity_premium(av, date_obj)
         raw_p = base_p + scarcity
         final_p = min(raw_p, cap) if cap else raw_p
-        eff_bar = price_to_effective_bar(rid, final_p) or own_bar
+        # ※ 수정: 항상 재역산하면 동가 BAR에서 엉뚱한 BAR가 표시됩니다.
+        #   GDB_TABLE은 BAR6=BAR7=BAR8=298,000이라 계산이 BAR6이어도
+        #   역산이 가장 저렴한 BAR8을 골라 'BAR6 ▲ BAR8'로 찍혔습니다.
+        #   → 가격이 계산 BAR의 표가와 같으면 계산 BAR를 그대로 씁니다.
+        eff_bar = own_bar if table.get(own_bar) == final_p else (
+            price_to_effective_bar(rid, final_p) or own_bar)
         result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': own_bar, 'price': final_p,
                        'is_manual': False, 'capped': bool(cap and raw_p > cap)}
         gv_occ[rid], gv_avail[rid] = occ, av
@@ -1339,9 +1360,12 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 except Exception:
                     _orig = bar
                 if _orig and _orig != bar:
+                    # ※ 수정: 화살표가 ▲(빨강)로 하드코딩돼 있어 요금이 내려간
+                    #   경우에도 ▲로 표시됐습니다. BAR 서열로 방향을 판정합니다.
+                    _ar, _ac = _bar_move_mark(_orig, bar)
                     bar_disp = (f"<span style='color:#bbb;text-decoration:line-through;"
                                 f"font-size:9px;'>{_orig}</span>"
-                                f"<span style='color:#c62828;'>▲</span><b>{bar}</b>")
+                                f"<span style='color:{_ac};'>{_ar}</span><b>{bar}</b>")
                 else:
                     bar_disp = f"<b>{bar}</b>"
                 content = f"{bar_disp}<br>{base_price:,}<br>{occ:.0f}%"
@@ -1387,9 +1411,10 @@ def render_master_table(current_df, prev_df, ch_name=None, title="", mode="기�
                 if _is_price_ovr:
                     _bar_disp2 = f"<b>직접가격</b>"
                 elif _orig2 and _orig2 != final_bar and not is_applied:
+                    _ar2, _ac2 = _bar_move_mark(_orig2, final_bar)
                     _bar_disp2 = (f"<span style='color:#bbb;text-decoration:line-through;"
                                   f"font-size:9px;'>{_orig2}</span>"
-                                  f"<span style='color:#c62828;'>▲</span><b>{final_bar}</b>")
+                                  f"<span style='color:{_ac2};'>{_ar2}</span><b>{final_bar}</b>")
                 else:
                     _bar_disp2 = f"<b>{final_bar}</b>"
                 if _guard_lifted:
