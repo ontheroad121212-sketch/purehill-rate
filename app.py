@@ -417,6 +417,21 @@ PICKUP_RULES = [               # (ratio 상한, 조정 단계)
 PICKUP_MIN_AVAIL = 1           # 잔여가 이보다 적으면 조정 안 함(매진 등)
 DOWN_MAX_STEPS = 2             # 인하(부진+픽업 합산) 상한
 
+# ── 픽업 판단이 유효한 리드타임 ──────────────────────────────────────
+# ※ 이 제한이 없으면 예약이 시작되지도 않은 먼 날짜에서 하루치 픽업이
+#   요금을 크게 흔듭니다. 실제 사례(12/01, D+90, HDT 34실 중 33실 잔여):
+#     어제 대비 0실 판매 → 소진예상 330일 > 90일 → 1단계 인하 → BAR8 250,000
+#     어제 대비 1실 판매 → 소진예상  33일 <  90일 → 1단계 인상 → BAR6 331,000
+#   1실 차이로 81,000원이 갈렸습니다. D+90에 3% 판매는 정상인데 '부진'으로
+#   판정한 것이고, 하루 표본을 90일로 외삽한 것도 무리였습니다.
+#
+# 픽업은 'OCC 기반 요금에 대한 근거리 보정'으로만 씁니다.
+# 먼 날짜의 수요는 OCC 래더가 이미 반영합니다.
+PICKUP_LEAD_UP_MAX = 45        # 인상 신호는 D+45 이내에서만 (실제 판매된 증거)
+PICKUP_LEAD_DOWN_MAX = 21      # 인하 신호는 D+21 이내에서만
+#   ↑ 비대칭 이유: '팔렸다'는 신호는 멀어도 사실이지만,
+#     '안 팔렸다'는 신호는 리드타임이 멀면 정상이라 근거가 되지 못합니다.
+
 _pickup_cache = {}
 
 
@@ -447,11 +462,17 @@ def get_pickup_per_day(date_obj, rid):
 
 
 def pickup_steps(date_obj, avail, pickup_per_day):
-    """소진 속도 기반 BAR 조정 단계 (-2 ~ +2)."""
+    """소진 속도 기반 BAR 조정 단계 (-2 ~ +2).
+
+    ※ 리드타임 제한 필수: 예약이 시작되지도 않은 먼 날짜에서는 하루치 픽업을
+      외삽해도 의미가 없습니다 (PICKUP_LEAD_* 주석의 12/01 사례 참고).
+    """
     if not _PRICING_V2 or pickup_per_day is None:
         return 0
     days_left = (date_obj - TODAY).days
     if days_left <= 0:
+        return 0
+    if days_left > max(PICKUP_LEAD_UP_MAX, PICKUP_LEAD_DOWN_MAX):
         return 0
     try:
         av = float(avail)
@@ -461,10 +482,17 @@ def pickup_steps(date_obj, avail, pickup_per_day):
         return 0                                   # 매진 등 — 조정 불필요
     est_days = av / max(pickup_per_day, PICKUP_FLOOR)
     ratio = est_days / days_left
-    for thr, step in PICKUP_RULES:
+    step = PICKUP_RULES[-1][1]
+    for thr, s in PICKUP_RULES:
         if ratio <= thr:
-            return step
-    return PICKUP_RULES[-1][1]
+            step = s
+            break
+    # 리드타임별 유효성 (인상/인하 비대칭)
+    if step > 0 and days_left > PICKUP_LEAD_UP_MAX:
+        return 0
+    if step < 0 and days_left > PICKUP_LEAD_DOWN_MAX:
+        return 0
+    return step
 
 
 # ── 판매 부진 시 인하 경로 (신규) ────────────────────────────────────
