@@ -219,8 +219,11 @@ def get_start_bar(date_obj):
     md = f"{m:02d}.{d:02d}"
     actual_is_weekend = date_obj.weekday() in [4, 5]
 
-    # ── 9~10월 최성수기: BAR1 시작 (ADR 인상, 한 단계 상향) ──
-    if (("09.24" <= md <= "09.28") or
+    # ── 9~10월 연휴: BAR1 시작 ──
+    # ※ 9/28은 기존에 연휴로 잡혀 BAR1 시작이었으나, 연휴 정의(9/24~27)에 맞춰 제외.
+    #   9/28이 대체공휴일이라면 아래 범위를 "09.28"로 되돌리고
+    #   HOLIDAY_RANGES도 함께 수정하세요.
+    if (("09.24" <= md <= "09.27") or
         ("10.01" <= md <= "10.10")):
         return "BAR1"
 
@@ -239,9 +242,11 @@ def get_start_bar(date_obj):
     if "07.17" <= md <= "08.29":
         return "BAR4" if actual_is_weekend else "BAR5"
 
-    # ── 12월 겨울 특수 (21~30, 24~26은 위에서 처리) ──
+    # ── 12월 연말 (21~30 중 24~26·31 제외) ──
+    # ※ 변경: 기존 BAR4 고정 → 11~12월 기준(주말 BAR6 / 주중 BAR7)보다 한 단계 위.
+    #   기존에는 비수기 기준보다 2~3단계 위여서 과도했습니다.
     if "12.21" <= md <= "12.30":
-        return "BAR4"
+        return "BAR5" if actual_is_weekend else "BAR6"
 
     # ── 9~10월: 주중 BAR5, 주말 BAR4 (ADR 인상, 한 단계 상향) ──
     if "09.01" <= md <= "10.31":
@@ -282,12 +287,15 @@ OCC_OFFSET_LADDER = [
     (50, 2),
     (30, 1),
 ]
-# 인상 단계 상한. 이 값 하나로 요금 곡선의 공격성을 조절합니다.
-# (오늘~180일 × OCC 0~100% 전수 시뮬레이션 기준 / 비수기 11/10 FDB 매진 시 요금)
-#   3 → 기존과 동일   전체 +2.0%,  OCC90%↑ -3.0%   | 502,000 (최고가의 56%)
-#   4 →              전체 +5.7%,  OCC90%↑ +5.6%   | 567,000 (63%)
-#   5 →              전체 +8.4%,  OCC90%↑ +14.3%  | 642,000 (72%)  ← 기본값
-#   6 →              전체 +9.7%,  OCC90%↑ +20.4%  | 721,000 (81%)
+# ※ 시즌 상한(get_bar_ceiling) 도입 후 이 값의 역할이 바뀌었습니다.
+#   "얼마나 높이 올라가는가"는 이제 시즌 상한이 정합니다.
+#   이 값은 "얼마나 빨리 상한에 도달하는가"(곡선의 기울기)를 조절합니다.
+#   값이 작을수록 낮은 OCC에서 빨리 상한에 붙습니다.
+# (오늘~180일 × OCC 0~100% 전수 시뮬레이션 / 기존 대비 전체 평균)
+#   3 → +3.4%  (가파름 — OCC 50%면 상한 근처)
+#   4 → +2.3%
+#   5 → +0.7%  ← 기본값
+#   6 → -0.6%  (완만 — 거의 매진돼야 상한)
 # 하단 "🔬 구/신 요금 곡선 비교" 패널에서 실제 데이터로 확인한 뒤 조정하세요.
 OCC_OFFSET_MAX = 5
 
@@ -300,6 +308,162 @@ OCC_OFFSET_MAX = 5
 #   (4실 중 3실 공실=OCC 25%를 '희소'로 오판하지 않도록)
 SCARCITY_BY_AVAIL = {1: 6, 2: 5, 3: 4}
 SCARCITY_MIN_OCC = 50
+
+# ── 시즌별 BAR 상한 (도달 가능한 최고 요금) ─────────────────────────
+# ※ 이게 없어서 시작BAR가 높은 날짜(9/25, 10/5 = 시작 BAR1)가
+#   OCC 50%만 되어도 BAR0P까지 올라갔습니다. 32실 중 16실이 남았는데
+#   최고가를 부르는 상태였습니다. 시작점만 있고 천장이 없었던 게 원인입니다.
+#
+# BAR0P는 "재고가 실제로 부족하다는 증거가 있는 날"에만 쓰는 요금이므로
+# 연휴·최성수기로 한정합니다. 그 외 날짜는 아무리 팔려도 아래 상한까지만.
+# 상한을 넘겨야 하는 예외 상황은 「예외 설정」이나 「오버라이드」로 수동 지정하세요.
+
+# BAR0P 도달을 허용하는 연휴·최성수기 구간
+HOLIDAY_RANGES = [
+    ("09.24", "09.27"),   # 추석 연휴
+    ("10.01", "10.10"),   # 개천절·한글날 연휴
+    ("12.24", "12.26"),   # 크리스마스
+    ("12.31", "12.31"),   # 연말
+    ("07.25", "08.08"),   # 여름 최성수기   ※ 기본값 — 확인 필요
+    ("08.14", "08.16"),   # 광복절 연휴     ※ 기본값 — 확인 필요
+]
+
+# 그 외 구간의 상한 (시작MM.DD, 끝MM.DD, 주중상한, 주말상한)
+# ※ 주말 = 금·토 (체크인 기준, 기존 로직과 동일)
+BAR_CEILING_RULES = [
+    ("07.17", "08.29", "BAR1", "BAR0"),   # 여름 성수기 나머지  ※ 기본값
+    ("08.09", "08.13", "BAR1", "BAR0"),   # 여름 준성수기       ※ 기본값
+    # 12월 연말(21~30, 24~26·31 제외). 시작BAR도 BAR4 → BAR6/BAR5로 내려서
+    # 고OCC 구간이 기존 대비 -20% 수준입니다. 연말 수요가 실제로 강하면
+    # 아래를 ("BAR2","BAR1") 정도로 올리세요.
+    ("12.21", "12.30", "BAR3", "BAR2"),
+]
+# 위 어디에도 안 걸리는 전 기간 (9~10월 평일/주말 포함)
+DEFAULT_BAR_CEILING = ("BAR3", "BAR2")
+
+# ── 최상단 BAR 잠금 해제 조건 ────────────────────────────────────────
+# 연휴 구간이라도 "달력"만으로 최고가가 나오면 안 됩니다.
+# 예: 9/25(추석)는 시작이 BAR1이라 OCC 50%(32실 중 16실 잔여)에도 BAR0P가
+#     나왔습니다. 절반이 비었는데 최고가를 부르는 상태입니다.
+# BAR0P/BAR0는 "재고가 실제로 부족하다는 근거"가 있을 때만 열립니다.
+# (BAR 코드: (필요 OCC%, 또는 이 잔여 실수 이하))
+TOP_BAR_GATES = {
+    "BAR0P": (85, 3),
+    "BAR0":  (70, 5),
+}
+
+
+def apply_top_bar_gate(bar, occ, avail):
+    """BAR0P/BAR0는 OCC 또는 잔여 실수 조건을 만족할 때만 허용."""
+    if not _PRICING_V2:
+        return bar
+    idx = BAR_ORDER.index(bar)
+    try:
+        av = float(avail)
+        if av != av:
+            av = None
+    except (TypeError, ValueError):
+        av = None
+    while idx < len(BAR_ORDER) - 1:
+        gate = TOP_BAR_GATES.get(BAR_ORDER[idx])
+        if not gate:
+            break
+        min_occ, max_av = gate
+        if occ >= min_occ or (av is not None and av <= max_av):
+            break
+        idx += 1                                   # 조건 미달 → 한 단계 아래로
+    return BAR_ORDER[idx]
+
+
+def _in_ranges(md, ranges):
+    return any(a <= md <= b for a, b in ranges)
+
+
+def get_bar_ceiling(date_obj):
+    """해당 날짜에 도달 가능한 최고 BAR (인상 상한)."""
+    if not _PRICING_V2:
+        return BAR_ORDER[0]
+    md = f"{date_obj.month:02d}.{date_obj.day:02d}"
+    if _in_ranges(md, HOLIDAY_RANGES):
+        return BAR_ORDER[0]                       # BAR0P 허용
+    is_weekend = date_obj.weekday() in [4, 5]
+    for a, b, wd_cap, we_cap in BAR_CEILING_RULES:
+        if a <= md <= b:
+            return we_cap if is_weekend else wd_cap
+    wd_cap, we_cap = DEFAULT_BAR_CEILING
+    return we_cap if is_weekend else wd_cap
+
+
+# ── 픽업(판매 속도) 기반 조정 ────────────────────────────────────────
+# OCC는 "지금까지 얼마나 팔렸나"(과거)일 뿐, "남은 재고가 남은 시간 안에
+# 팔릴까"(미래)를 말해주지 않습니다. 같은 '잔여 8실'이라도
+#   D-60 잔여 8실 → 60일 남았으니 팔린다 → 올려야 함
+#   D-1  잔여 8실 → 내일 8실을 팔아야 함 → 올리면 못 팜 → 내려야 함
+# 이 둘을 OCC만으로는 구분할 수 없습니다.
+#
+# 직전 스냅샷(prev_df) 대비 판매 속도로 소진 예상일을 구해,
+# 남은 일수와 비교합니다.  ratio = 소진예상일 / 남은일수
+SNAPSHOT_INTERVAL_DAYS = 1     # 리포트 업로드 주기(일). 매일 저장하면 1
+PICKUP_FLOOR = 0.1             # 픽업 0일 때 쓰는 하한 (10일에 1실)
+PICKUP_RULES = [               # (ratio 상한, 조정 단계)
+    (0.25, +2),                # 남은 시간의 1/4 만에 소진될 속도 → 수요 초과
+    (0.50, +1),
+    (2.00,  0),                # 정상 — 조정 없음
+    (4.00, -1),                # 남은 시간의 2~4배 필요 → 못 판다
+    (10**9, -2),
+]
+PICKUP_MIN_AVAIL = 1           # 잔여가 이보다 적으면 조정 안 함(매진 등)
+DOWN_MAX_STEPS = 2             # 인하(부진+픽업 합산) 상한
+
+_pickup_cache = {}
+
+
+def get_pickup_per_day(date_obj, rid):
+    """직전 스냅샷 대비 하루당 판매 실수. 데이터 없으면 None."""
+    key = (date_obj, rid)
+    if key in _pickup_cache:
+        return _pickup_cache[key]
+    val = None
+    try:
+        prev = st.session_state.get('prev_df', pd.DataFrame())
+        curr = st.session_state.get('today_df', pd.DataFrame())
+        if prev is not None and curr is not None and not prev.empty and not curr.empty:
+            p = prev[(prev['RoomID'] == rid) & (prev['Date'] == date_obj)]
+            c = curr[(curr['RoomID'] == rid) & (curr['Date'] == date_obj)]
+            if not p.empty and not c.empty:
+                pa = float(p.iloc[0]['Available']) if pd.notna(p.iloc[0]['Available']) else float('nan')
+                ca = float(c.iloc[0]['Available']) if pd.notna(c.iloc[0]['Available']) else float('nan')
+                if pa == pa and ca == ca:
+                    val = max(0.0, pa - ca) / max(1, SNAPSHOT_INTERVAL_DAYS)
+    except Exception as e:
+        msg = f"픽업 계산 실패 ({rid} {date_obj}): {type(e).__name__}: {e}"
+        if msg not in _logic_errors:
+            _logic_errors.append(msg)
+        val = None
+    _pickup_cache[key] = val
+    return val
+
+
+def pickup_steps(date_obj, avail, pickup_per_day):
+    """소진 속도 기반 BAR 조정 단계 (-2 ~ +2)."""
+    if not _PRICING_V2 or pickup_per_day is None:
+        return 0
+    days_left = (date_obj - TODAY).days
+    if days_left <= 0:
+        return 0
+    try:
+        av = float(avail)
+    except (TypeError, ValueError):
+        return 0
+    if av != av or av < PICKUP_MIN_AVAIL:
+        return 0                                   # 매진 등 — 조정 불필요
+    est_days = av / max(pickup_per_day, PICKUP_FLOOR)
+    ratio = est_days / days_left
+    for thr, step in PICKUP_RULES:
+        if ratio <= thr:
+            return step
+    return PICKUP_RULES[-1][1]
+
 
 # ── 판매 부진 시 인하 경로 (신규) ────────────────────────────────────
 # 기존에는 OCC가 요금을 올리기만 하고 절대 내리지 못해, 성수기 공실 100%에도
@@ -357,12 +521,15 @@ def discount_steps(date_obj, occ):
     return 0
 
 
-def determine_bar(date_obj, occ, avail=None):
-    """날짜 + OCC(+잔여 실수) → BAR 코드.
+def determine_bar(date_obj, occ, avail=None, pickup=None):
+    """날짜 + OCC(+잔여 실수 +판매 속도) → BAR 코드.
 
-    시작 BAR에서 OCC에 따라 고가 BAR로 이동하고, 판매 부진 시 저가 BAR로 내려갑니다.
-    avail을 넘기면 잔여 실수 기준 희소성이 함께 반영됩니다(재고 규모 보정).
-    _PRICING_V2 = False 이면 기존 곡선(31/51/81 → 최대 3단계, 인하 없음)으로 동작합니다.
+    시작 BAR에서 출발해
+      (+) OCC / 잔여 실수 / 소진 속도가 빠르면 고가 BAR로
+      (-) 판매 부진 / 소진 속도가 느리면 저가 BAR로
+    이동하되, 시즌별 상한(get_bar_ceiling)을 절대 넘지 않습니다.
+
+    _PRICING_V2 = False 이면 기존 곡선(31/51/81 → 최대 3단계, 인하·상한 없음)으로 동작.
     """
     start_idx = BAR_ORDER.index(get_start_bar(date_obj))
 
@@ -373,9 +540,30 @@ def determine_bar(date_obj, occ, avail=None):
         else:           offset = 0
         return BAR_ORDER[max(0, start_idx - offset)]
 
-    offset = occ_to_offset(occ, avail) - discount_steps(date_obj, occ)
+    # 시즌 상한: 상한 BAR보다 비싸질 수 없음.
+    # 단, 상한이 시작BAR보다 비싸면 시작BAR를 존중 (상한이 시즌 시작 요금을
+    # 아래로 끌어내리는 일은 없습니다).
+    ceil_idx = min(max(BAR_ORDER.index(get_bar_ceiling(date_obj)), 0), start_idx)
+    band = start_idx - ceil_idx                    # 이 날짜가 올라갈 수 있는 총 단계
+
+    # ※ 인상폭을 '절대 단계'가 아니라 '밴드 대비 비율'로 환산합니다.
+    #   그러지 않으면 밴드가 좁은 날(9월 평일: 시작 BAR5 → 상한 BAR3 = 2단계)에서
+    #   OCC 50%가 밴드를 다 써버려 50~100% 구간이 전부 같은 요금이 됩니다.
+    up = occ_to_offset(occ, avail)
+    up_eff = int(band * min(1.0, up / OCC_OFFSET_MAX) + 0.5) if band > 0 else 0
+
+    down = discount_steps(date_obj, occ)
+    pk = pickup_steps(date_obj, avail, pickup)
+    offset = up_eff - down + pk
+    offset = max(offset, -DOWN_MAX_STEPS)          # 인하 상한
+
     idx = start_idx - offset
-    return BAR_ORDER[max(0, min(len(BAR_ORDER) - 1, idx))]
+    idx = max(ceil_idx, min(len(BAR_ORDER) - 1, idx))
+
+    # 최상단 BAR는 재고 근거가 있을 때만 (달력만으로 최고가가 나오지 않게)
+    gated_idx = BAR_ORDER.index(apply_top_bar_gate(BAR_ORDER[idx], occ, avail))
+    # 게이트는 '올라간 만큼'만 되돌립니다 — 시즌 시작 요금 아래로는 내리지 않음
+    return BAR_ORDER[min(gated_idx, max(start_idx, idx))]
 
 
 def blend_occ(room_occ, hotel_occ):
@@ -484,7 +672,9 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
     # ※ 수정: 캐시 키에 id(curr_df)를 쓰면 (a) 내용 변경을 감지하지 못하고
     #   (b) DataFrame이 GC된 뒤 주소가 재사용되면 다른 데이터의 값을 반환합니다.
     #   해당 날짜 행의 내용 지문으로 교체.
-    cache_key = (date_str, _rows_signature(curr_df, date_obj),
+    _prev_sig = _rows_signature(st.session_state.get('prev_df', pd.DataFrame()), date_obj) \
+        if _PRICING_V2 else None
+    cache_key = (date_str, _rows_signature(curr_df, date_obj), _prev_sig,
                  tuple(sorted(manual_bars.items())), _PRICING_V2, ROOM_OCC_BLEND)
     if cache_key in _price_cache:
         return _price_cache[cache_key]
@@ -525,7 +715,8 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             bar, is_manual = manual_bar, True
         else:
             # ROOM_OCC_BLEND=0(기본)이면 객실별 OCC 그대로 — 기존 동작과 동일
-            bar = determine_bar(date_obj, blend_occ(occ, hotel_occ), av)
+            bar = determine_bar(date_obj, blend_occ(occ, hotel_occ), av,
+                                get_pickup_per_day(date_obj, rid))
             is_manual = False
 
         bars[rid] = bar
@@ -576,11 +767,13 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         #   (기존에는 오버라이드 매트릭스에서 입력해도 조용히 무시됐습니다)
         man = _clean_manual_bar(manual_bars.get(f"{date_str}_{rid}"), date_str, rid)
         if man:
-            result[rid] = {'occ': occ, 'bar': man, 'original_bar': determine_bar(date_obj, occ, av),
+            result[rid] = {'occ': occ, 'bar': man,
+                           'original_bar': determine_bar(date_obj, occ, av,
+                                                         get_pickup_per_day(date_obj, rid)),
                            'price': table.get(man, 0), 'is_manual': True, 'capped': False}
             continue
 
-        own_bar = determine_bar(date_obj, occ, av)
+        own_bar = determine_bar(date_obj, occ, av, get_pickup_per_day(date_obj, rid))
         base_p = table.get(own_bar, list(table.values())[-1])
         # V2: 희소성은 OCC 래더(SCARCITY_BY_AVAIL)에서 이미 반영 → 정액 가산 중복 제거
         scarcity = 0 if _PRICING_V2 else compute_scarcity_premium(av, date_obj)
@@ -610,7 +803,8 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             link_bar = snap_to_bar_ceil(FFD_TABLE, fde_p + 20000)
             link_idx = bar_rank(link_bar) or 0
             # 자체 재고 신호를 ±LINK_FLEX_STEPS 범위에서 반영
-            own_idx = bar_rank(determine_bar(date_obj, occ_ffd, av_ffd))
+            own_idx = bar_rank(determine_bar(date_obj, occ_ffd, av_ffd,
+                                             get_pickup_per_day(date_obj, "FFD")))
             idx = link_idx
             if own_idx is not None:
                 delta = max(-LINK_FLEX_STEPS, min(LINK_FLEX_STEPS, own_idx - link_idx))
@@ -645,7 +839,8 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         link_bar = fdb_bar
         if _PRICING_V2:
             # 자체 재고 신호를 ±LINK_FLEX_STEPS 범위에서 반영
-            own_idx = bar_rank(determine_bar(date_obj, occ, av))
+            own_idx = bar_rank(determine_bar(date_obj, occ, av,
+                                             get_pickup_per_day(date_obj, rid)))
             if own_idx is not None:
                 delta = max(-LINK_FLEX_STEPS, min(LINK_FLEX_STEPS, own_idx - fdb_idx))
                 link_bar = BAR_ORDER[max(0, min(len(BAR_ORDER) - 1, fdb_idx + delta))]
@@ -750,7 +945,7 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
         type_code, _season, _is_weekend = get_season_details(date_obj)
         return occ, type_code, 0, False
 
-    bar = determine_bar(date_obj, occ, av_eff)
+    bar = determine_bar(date_obj, occ, av_eff, get_pickup_per_day(date_obj, room_id))
     price = table.get(bar, table.get(BAR_ORDER[-1], 0))
     cap = ROOM_PRICE_CAPS.get(room_id)
     if cap:
