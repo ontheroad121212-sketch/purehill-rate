@@ -478,26 +478,89 @@ DISCOUNT_RULES = [
 DISCOUNT_MAX_STEPS = 2          # 시작BAR 대비 최대 인하 단계
 # 인하는 요금표 최저 BAR(BAR8)를 하한으로 자동 클램프됩니다.
 
-# ── 역전방지 계단 간격 ───────────────────────────────────────────────
-# (하위객실, 상위객실, 최소 가격차)
+# ── 역전방지 계단 ────────────────────────────────────────────────────
+# 【발동 원칙】 역전방지의 목적은 '카니발라이제이션 방지'입니다.
+#   상급 객실이 하급보다 싸면 하급을 사려던 고객이 상급으로 올라갑니다.
+#   → 하급 재고가 안 팔리고, 상급을 제값보다 싸게 팔게 됩니다(이중 손실).
+#   따라서 발동 기준은 "하급 객실에 잠식당할 재고가 실제로 남아 있는가"입니다.
+#   OCC 비교가 아닙니다.
+#
+#   ① 하급에 팔 재고가 충분     → 간격 전액 (상급을 싸게 두면 하급이 죽음)
+#   ② 하급이 매진 임박          → 간격 × LADDER_GAP_SHRINK (지킬 재고가 거의 없음)
+#   ③ 하급 매진 (잔여 0)        → 계단에서 제외 (잠식할 재고 없음, 예약 자체 불가)
+#
+#   실제 사례(2026-09-14): HDT 3/34실(91%) → ② 발동으로 HDT→HDP 간격만 축소.
+#   HDP 13실·FDB 16실은 팔 재고가 있으므로 그 위 계단은 전액 유지.
+#
+#   ※ 계단은 '같은 상품군' 안에서만 적용합니다. 그린밸리(GDB/GDF)는 펜션형으로
+#     메인 호텔동과 상품군이 달라 별도 계단을 씁니다.
+
+# 메인 호텔동 계단 (하위객실, 상위객실, 최소 가격차)
 LADDER_GAPS = [
     ("HDT", "HDP", 30000),
     ("HDP", "FDB", 35000),
     ("FDB", "FDE", 37000),
     ("FDE", "HDF", 70000),
 ]
-# ※ 캐스케이드 완화: 하위 객실 하나가 매진되면 그 가격이 위 객실 전부의 하한이
-#   되어, 텅 빈 상위 객실까지 상한까지 끌려 올라갔습니다.
-#   실제 사례(2026-09-14): HDT 3/34실(91%) 매진 임박 → HDP 32%·FDB 50%·
-#   FDE 38%·HDF 39%인데도 전부 상한 BAR3으로 강제 인상 (FDE +122,000원).
-#   9월 20일치 검사에서 메인 5객실 100셀 중 33셀이 자체 OCC가 아니라
-#   역전방지로 요금이 결정되고 있었습니다(평균 +21,140원).
-#
-#   → 상위 객실 OCC가 하위 객실보다 '낮을 때만' 간격을 이 비율로 축소합니다.
-#     정상적인 날(위 객실이 더 잘 팔리는 날)은 위 간격을 그대로 유지합니다.
-#     1.0 = 축소 안 함(기존 동작) / 0.3 = 기본값 / 0.5 = 보수적
-#   실측 영향: 9월 평균 -1.6%, 역전 0건, 100셀 중 30셀만 변경
-LADDER_GAP_SHRINK = 0.3
+# 그린밸리 계단 (신규). 기존에는 GDB↔GDF 사이에 계단이 아예 없어서
+# GDF(패밀리)가 GDB(더블)보다 싸지는 날이 9월 20일 중 4일 발생했습니다.
+# 최소 가격차 90,000원 = 두 요금표의 같은 BAR 최소 격차(BAR8 기준 92,000)에 맞춤.
+GREENVALLEY_GAPS = [
+    ("GDB", "GDF", 90000),
+]
+LADDER_GAP_SHRINK = 0.3        # 하급 매진 임박 시 간격 축소 비율 (1.0 = 축소 안 함)
+LADDER_NEAR_SELLOUT_AVAIL = 2  # 하급 잔여가 이 이하면 '매진 임박'
+LADDER_NEAR_SELLOUT_OCC = 90   # 또는 하급 OCC가 이 이상이면 '매진 임박'
+
+
+def ladder_gap_factor(occ_low, avail_low):
+    """하급 객실의 판매 가능 상태 → 계단 간격 배수. None이면 계단 제외(매진)."""
+    if not _PRICING_V2:
+        return 1.0
+    try:
+        av = float(avail_low)
+    except (TypeError, ValueError):
+        av = None
+    if av is not None and av == av and av <= 0:
+        return None                                   # 매진 → 계단에서 제외
+    if (av is not None and av == av and av <= LADDER_NEAR_SELLOUT_AVAIL) \
+            or occ_low >= LADDER_NEAR_SELLOUT_OCC:
+        return LADDER_GAP_SHRINK                      # 매진 임박 → 축소
+    return 1.0                                        # 팔 재고 충분 → 전액
+
+
+def apply_ladder(fp, gaps, occs, avails):
+    """가격 계단 적용.
+
+    - 매진(잔여 0) 객실은 '기준'에서 제외합니다. 예약이 불가하므로 잠식할 재고가
+      없고, 그 가격을 위 객실의 하한으로 쓰면 캐스케이드만 발생합니다.
+    - 제외된 객실을 건너뛴 구간의 간격은 합산해서 적용합니다.
+    반환: 간격이 축소된 객실 집합 (표시용)
+    """
+    order = [g[0] for g in gaps] + [gaps[-1][1]]
+    gap_of = {up: g for _lo, up, g in gaps}
+    shrunk = set()
+    last = None                       # 기준이 되는 '판매 중' 객실
+    for rid in order:
+        if rid not in fp:
+            continue
+        if last is not None:
+            f = ladder_gap_factor(occs.get(last, 0), avails.get(last))
+            if f is not None:
+                i_l, i_n = order.index(last), order.index(rid)
+                gap = sum(gap_of.get(order[j], 0) for j in range(i_l + 1, i_n + 1))
+                if f < 1.0:
+                    shrunk.add(rid)
+                fp[rid] = max(fp[rid], fp[last] + int(gap * f))
+        # 판매 중인 객실만 다음 기준이 됩니다 (매진 객실은 기준에서 제외)
+        av = avails.get(rid)
+        try:
+            is_open = av is None or (float(av) == float(av) and float(av) > 0)
+        except (TypeError, ValueError):
+            is_open = True
+        if is_open:
+            last = rid
+    return shrunk
 
 # ── 연동 객실이 자체 재고를 반영하는 폭 ──────────────────────────────
 # FPT·PPV는 FDB BAR를, FFD는 FDE 가격을 그대로 따라갔습니다(자체 재고 무시).
@@ -723,7 +786,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
 
     # Step 2~3. 메인 5개 객실 BAR + 기본 가격
     main_rooms_order = ["HDT", "HDP", "FDB", "FDE", "HDF"]
-    base_prices, bars, occs, is_manuals = {}, {}, {}, {}
+    base_prices, bars, occs, avails, is_manuals = {}, {}, {}, {}, {}
 
     for rid in main_rooms_order:
         m = date_rows[date_rows['RoomID'] == rid]
@@ -732,6 +795,7 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         occ, av, tot, _ok = normalize_inventory(
             m.iloc[0]['Available'], m.iloc[0]['Total'], date_str, rid, fallback_occ=hotel_occ)
         occs[rid] = occ
+        avails[rid] = av
 
         manual_bar = _clean_manual_bar(manual_bars.get(f"{date_str}_{rid}"), date_str, rid)
         if manual_bar:
@@ -746,19 +810,9 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         is_manuals[rid] = is_manual
         base_prices[rid] = PRICE_TABLE.get(rid, {}).get(bar, 0)
 
-    # Step 4. 가격 역전 방지 (계단 유지)
-    # ※ 상위 객실 OCC가 하위 객실보다 낮으면 간격을 LADDER_GAP_SHRINK 비율로 축소.
-    #   하위 객실 하나의 매진이 텅 빈 상위 객실까지 끌어올리던 캐스케이드 완화.
+    # Step 4. 가격 역전 방지 (계단) — 발동 기준은 ladder_gap_factor() 참고
     fp = dict(base_prices)
-    ladder_shrunk = {}          # 축소가 적용된 객실 (툴팁/디버깅용)
-    for _low, _up, _gap in LADDER_GAPS:
-        if _low not in fp or _up not in fp:
-            continue
-        g = _gap
-        if _PRICING_V2 and occs.get(_up, 0) < occs.get(_low, 0):
-            g = int(_gap * LADDER_GAP_SHRINK)
-            ladder_shrunk[_up] = True
-        fp[_up] = max(fp[_up], fp[_low] + g)
+    ladder_shrunk = apply_ladder(fp, LADDER_GAPS, occs, avails)
 
     for rid in main_rooms_order:
         if rid not in fp:
@@ -776,10 +830,12 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
             'original_bar': occ_bar,
             'price': adj_price,
             'is_manual': is_manuals.get(rid, False),
+            'ladder_shrunk': rid in ladder_shrunk,   # 하급 매진임박으로 계단 축소됨
         }
 
     # Step 5. GDB/GDF: 자체 OCC 기반 독립 BAR (그린밸리 펜션형, 메인 계층 무관)
     fde_p = fp.get("FDE", 0)
+    gv_occ, gv_avail = {}, {}
 
     for rid, table in [("GDB", GDB_TABLE), ("GDF", GDF_TABLE)]:
         m = date_rows[date_rows['RoomID'] == rid]
@@ -808,6 +864,23 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         eff_bar = price_to_effective_bar(rid, final_p) or own_bar
         result[rid] = {'occ': occ, 'bar': eff_bar, 'original_bar': own_bar, 'price': final_p,
                        'is_manual': False, 'capped': bool(cap and raw_p > cap)}
+        gv_occ[rid], gv_avail[rid] = occ, av
+
+    # Step 5-B. 그린밸리 계단 (GDB → GDF)
+    # ※ 기존에는 GDB↔GDF 사이에 역전방지가 아예 없어 GDF(패밀리)가
+    #   GDB(더블)보다 싸지는 날이 발생했습니다(9월 20일 중 4일).
+    if _PRICING_V2:
+        gv_fp = {r: result[r]['price'] for r in ("GDB", "GDF")
+                 if r in result and not result[r].get('is_manual')}
+        if len(gv_fp) == 2:
+            apply_ladder(gv_fp, GREENVALLEY_GAPS, gv_occ, gv_avail)
+            for r in ("GDB", "GDF"):
+                if gv_fp[r] != result[r]['price']:
+                    cap_r = ROOM_PRICE_CAPS.get(r)
+                    newp = min(gv_fp[r], cap_r) if cap_r else gv_fp[r]
+                    result[r]['price'] = newp
+                    result[r]['bar'] = price_to_effective_bar(r, newp) or result[r]['bar']
+                    result[r]['capped'] = bool(cap_r and gv_fp[r] > cap_r)
 
     # Step 6. FFD: FDE 연동 (FDE+20k 플로어) + 자체 재고 반영
     m_ffd = date_rows[date_rows['RoomID'] == "FFD"]
