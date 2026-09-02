@@ -478,6 +478,27 @@ DISCOUNT_RULES = [
 DISCOUNT_MAX_STEPS = 2          # 시작BAR 대비 최대 인하 단계
 # 인하는 요금표 최저 BAR(BAR8)를 하한으로 자동 클램프됩니다.
 
+# ── 역전방지 계단 간격 ───────────────────────────────────────────────
+# (하위객실, 상위객실, 최소 가격차)
+LADDER_GAPS = [
+    ("HDT", "HDP", 30000),
+    ("HDP", "FDB", 35000),
+    ("FDB", "FDE", 37000),
+    ("FDE", "HDF", 70000),
+]
+# ※ 캐스케이드 완화: 하위 객실 하나가 매진되면 그 가격이 위 객실 전부의 하한이
+#   되어, 텅 빈 상위 객실까지 상한까지 끌려 올라갔습니다.
+#   실제 사례(2026-09-14): HDT 3/34실(91%) 매진 임박 → HDP 32%·FDB 50%·
+#   FDE 38%·HDF 39%인데도 전부 상한 BAR3으로 강제 인상 (FDE +122,000원).
+#   9월 20일치 검사에서 메인 5객실 100셀 중 33셀이 자체 OCC가 아니라
+#   역전방지로 요금이 결정되고 있었습니다(평균 +21,140원).
+#
+#   → 상위 객실 OCC가 하위 객실보다 '낮을 때만' 간격을 이 비율로 축소합니다.
+#     정상적인 날(위 객실이 더 잘 팔리는 날)은 위 간격을 그대로 유지합니다.
+#     1.0 = 축소 안 함(기존 동작) / 0.3 = 기본값 / 0.5 = 보수적
+#   실측 영향: 9월 평균 -1.6%, 역전 0건, 100셀 중 30셀만 변경
+LADDER_GAP_SHRINK = 0.3
+
 # ── 연동 객실이 자체 재고를 반영하는 폭 ──────────────────────────────
 # FPT·PPV는 FDB BAR를, FFD는 FDE 가격을 그대로 따라갔습니다(자체 재고 무시).
 # 연동 BAR 기준 ±LINK_FLEX_STEPS 단계까지 자체 재고 신호를 반영합니다.
@@ -725,16 +746,19 @@ def compute_all_prices_for_date(date_obj, curr_df, manual_bars=None):
         is_manuals[rid] = is_manual
         base_prices[rid] = PRICE_TABLE.get(rid, {}).get(bar, 0)
 
-    # Step 4. 가격 역전 방지
+    # Step 4. 가격 역전 방지 (계단 유지)
+    # ※ 상위 객실 OCC가 하위 객실보다 낮으면 간격을 LADDER_GAP_SHRINK 비율로 축소.
+    #   하위 객실 하나의 매진이 텅 빈 상위 객실까지 끌어올리던 캐스케이드 완화.
     fp = dict(base_prices)
-    if "HDT" in fp and "HDP" in fp:
-        fp["HDP"] = max(fp["HDP"], fp["HDT"] + 30000)
-    if "HDP" in fp and "FDB" in fp:
-        fp["FDB"] = max(fp["FDB"], fp["HDP"] + 35000)
-    if "FDB" in fp and "FDE" in fp:
-        fp["FDE"] = max(fp["FDE"], fp["FDB"] + 37000)
-    if "FDE" in fp and "HDF" in fp:
-        fp["HDF"] = max(fp["HDF"], fp["FDE"] + 70000)
+    ladder_shrunk = {}          # 축소가 적용된 객실 (툴팁/디버깅용)
+    for _low, _up, _gap in LADDER_GAPS:
+        if _low not in fp or _up not in fp:
+            continue
+        g = _gap
+        if _PRICING_V2 and occs.get(_up, 0) < occs.get(_low, 0):
+            g = int(_gap * LADDER_GAP_SHRINK)
+            ladder_shrunk[_up] = True
+        fp[_up] = max(fp[_up], fp[_low] + g)
 
     for rid in main_rooms_order:
         if rid not in fp:
