@@ -92,7 +92,8 @@ NEW_MULT = {
     "FPT": 1.898,
     "PPV": 2.843,
 }
-NEW_ROOMS = ["HDT", "HDP", "FDB", "FDE", "HDF", "GDB", "GDF", "FFD", "FPT", "PPV"]
+# 표시 순서는 기존 앱 ALL_ROOMS 와 동일합니다 (메인 호텔동 → 특수객실).
+NEW_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF", "GDB", "GDF", "FFD", "FPT", "PPV"]
 NEW_ROOM_NAMES = {
     "HDT": "힐사이드 디럭스 트윈", "HDP": "힐사이드 디럭스 패밀리",
     "FDB": "포레스트 디럭스 더블", "FDE": "포레스트 디럭스 이그제큐티브",
@@ -1196,7 +1197,7 @@ def new_compute_change(curr_df, prev_df, day_df, type_df, today=None):
     return dc, tc, summary
 
 
-def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
+def _new_tab_change(day_cmp, type_cmp, summary, compare_label="", day_df=None):
     if not summary:
         st.markdown("""
 <div class="renote warn"><b>비교할 이전 기록이 없습니다.</b>
@@ -1271,6 +1272,71 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
                     + "".join(body) + "</tbody></table></div></div>",
                     unsafe_allow_html=True)
 
+    # ── 가로 매트릭스: 행 = 객실 · 열 = 날짜 ──────────────────────
+    if type_cmp is not None and not type_cmp.empty and day_df is not None \
+            and not day_df.empty:
+        st.divider()
+        st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
+        mvonly = st.checkbox("칸이 바뀐 셀만 색칠", value=True, key="new_chg_mxonly")
+        dts = _date_window(day_df, "new_chg_mx")
+        if dts:
+            dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
+            tix = type_cmp.drop_duplicates(subset=['date', 'rt'], keep='first')
+            tix = tix.set_index(['date', 'rt'])
+            st.markdown(_mx_title("이전 대비 변화 — 행 = 객실 · 열 = 날짜", True),
+                        unsafe_allow_html=True)
+            head = _mx_head(dts, dmap, "객실")
+            rows = []
+            cells = []
+            for d in dts:
+                sub = day_cmp[day_cmp['date'] == d]
+                if sub.empty:
+                    cells.append("<td class='mut'>—</td>")
+                    continue
+                r = sub.iloc[0]
+                mvv = int(r['rung_move'])
+                bg, fg = new_color(int(r['rung']))
+                arw = "—" if mvv == 0 else (f"▲{mvv}" if mvv > 0 else f"▼{-mvv}")
+                cells.append(f"<td class='c3' style='background:{bg};color:{fg};"
+                             f"font-weight:700'>{r['p_lab']}→{r['lab']}"
+                             f"<em>{arw} · {_won(r['sold'])}실</em></td>")
+            rows.append("<tr class='gend'><td class='rh'>날짜 칸 (기준)"
+                        "<em style='display:block;font-style:normal;font-size:9px;"
+                        "font-weight:400;color:#7d858c'>이전→현재 · 판매</em></td>"
+                        + "".join(cells) + "</tr>")
+            for rt in NEW_ROW_ORDER:
+                cls = "gend" if rt in NEW_GROUP_END else ""
+                cells = []
+                for d in dts:
+                    key = (d, rt)
+                    if key not in tix.index:
+                        cells.append("<td class='mut'>—</td>")
+                        continue
+                    row = tix.loc[key]
+                    mvv = int(row['rung_move'])
+                    sold = row['sold']
+                    if mvv == 0 and mvonly:
+                        cells.append(f"<td class='mut c3'>{row['lab']}"
+                                     f"<em>{_won(sold)}실</em></td>")
+                        continue
+                    bg, fg = new_color(int(row['rung']))
+                    arw = "—" if mvv == 0 else (f"▲{mvv}" if mvv > 0 else f"▼{-mvv}")
+                    pm = int(row['price_move'] or 0)
+                    cells.append(f"<td class='c3' style='background:{bg};color:{fg};"
+                                 f"font-weight:700'>{row['p_lab']}→{row['lab']}"
+                                 f"<em>{arw} · {_won(sold)}실</em>"
+                                 f"<i style='color:{fg};opacity:.8'>{pm:+,}원</i></td>")
+                rows.append(
+                    f"<tr class='{cls}'><td class='rh'>{rt}"
+                    f"<em style='display:block;font-style:normal;font-size:9px;"
+                    f"font-weight:400;color:#7d858c'>{NEW_ROOM_NAMES.get(rt,'')}</em></td>"
+                    + "".join(cells) + "</tr>")
+            st.markdown("<div class='mxwrap'><table class='mx'>" + head + "<tbody>"
+                        + "".join(rows) + "</tbody></table></div>",
+                        unsafe_allow_html=True)
+            st.caption("셀 = 이전 칸 → 현재 칸 / 이동·판매실수 / 회원가 차액. "
+                       "회색은 칸이 그대로인 셀입니다.")
+
     st.divider()
     st.markdown("##### 날짜별 재고 변화 (전체)")
     only_moved = st.checkbox("재고가 움직인 날만", value=True, key="new_chg_only")
@@ -1326,144 +1392,439 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
 
 
 # =============================================================================
-# 14. 탭 3 — 일자별 칸
+# 11-B. 가로 매트릭스 (기존 앱과 같은 문법: 행 = 객실 · 열 = 날짜)
+# -----------------------------------------------------------------------------
+#  기존 render_master_table 의 구조를 그대로 따릅니다.
+#    · 2단 헤더 — 위 MM-DD, 아래 요일 (일=빨강 / 토=파랑)
+#    · 첫 열 고정(sticky) + 오른쪽 굵은 경계선
+#    · HDF · PPV 행 아래 굵은 구분선 (메인 호텔동 / 특수객실 블록 구분)
+#    · 셀은 3줄 (칸 / 요금 / 잔여)
+#    · 좌우 스크롤
 # =============================================================================
+NEW_MX_CSS = """
+<style>
+.mxwrap{overflow-x:auto;white-space:nowrap;border:1px solid #ddd;background:#fff}
+.mx{border-collapse:collapse;font-size:11px;min-width:1000px;
+    font-variant-numeric:tabular-nums}
+.mx th,.mx td{border:1px solid #ddd;padding:4px 5px;text-align:center;white-space:nowrap}
+.mx thead th{background:#f9f9f9;font-weight:700;font-size:11px}
+.mx thead th.hd{background:#FBEEE2}
+.mx th.rh,.mx td.rh{position:sticky;left:0;z-index:3;background:#fff;text-align:left;
+    border-right:4px solid #000;min-width:132px;font-weight:600}
+.mx thead th.rh{background:#f9f9f9;z-index:4}
+.mx tr.gend td,.mx tr.gend th{border-bottom:3.4px solid #000}
+.mx td.c3{line-height:1.18}
+.mx td.c3 em{display:block;font-style:normal;font-size:9.5px;opacity:.85;font-weight:400}
+.mx td.c3 i{display:block;font-style:normal;font-size:9px;color:#7d858c;font-weight:400}
+.mx td.off{background:#F2F3F4;color:#9AA1A8;font-weight:400}
+.mx td.mut{color:#8A929A;font-weight:400}
+.mx tr.alt td.rh{background:#FAFBFC}
+.mx tr:hover td:not(.rh){filter:brightness(.97)}
+.mxtitle{margin:22px 0 8px;font-weight:700;font-size:15px;padding:9px 12px;
+    background:#f0f2f6;border-left:9px solid #16202B}
+.mxtitle.acc{background:#E9F1F8;border-left-color:#1F5C8B}
+</style>
+"""
+
+# 기존 앱과 같은 행 순서 · 같은 위치에 굵은 구분선
+NEW_ROW_ORDER = list(NEW_ROOMS)
+NEW_GROUP_END = {"HDF", "PPV"}
+
+
+def _mx_head(dates, dmap=None, first_col="객실"):
+    """2단 날짜 헤더 (위 MM-DD / 아래 요일). 연휴 열은 배경을 살짝 물들입니다."""
+    h1 = [f"<th class='rh' rowspan='2'>{first_col}</th>"]
+    h2 = []
+    for d in dates:
+        hol = ""
+        if dmap is not None and d in dmap.index:
+            hol = str(dmap.loc[d, 'hol'] or "")
+        cls = "hd" if hol else ""
+        h1.append(f"<th class='{cls}' title='{hol}'>{d.strftime('%m-%d')}</th>")
+        wd = WD_KR[d.weekday()]
+        col = "#D32F2F" if wd == '일' else ("#1565C0" if wd == '토' else "#333")
+        h2.append(f"<th class='{cls}' style='color:{col}'>{wd}</th>")
+    return ("<thead><tr>" + "".join(h1) + "</tr><tr>" + "".join(h2)
+            + "</tr></thead>")
+
+
+def _mx_title(text, accent=False):
+    return f"<div class='mxtitle{' acc' if accent else ''}'>{text}</div>"
+
+
+def _date_window(day_df, key):
+    """월 단위로 표시 범위를 줄입니다 (열이 100개를 넘으면 읽기 어려우니)."""
+    if day_df is None or day_df.empty:
+        return []
+    all_d = sorted(day_df['date'].unique())
+    months = sorted({(d.year, d.month) for d in all_d})
+    labels = [f"{y}-{m:02d}" for y, m in months]
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        pick = st.multiselect("표시 월", labels, default=labels, key=f"{key}_mon")
+    with c2:
+        past = st.checkbox("과거 날짜", value=False, key=f"{key}_past")
+    keep = {tuple(int(x) for x in p.split('-')) for p in pick}
+    out = [d for d in all_d if (d.year, d.month) in keep]
+    if not past:
+        sub = day_df.set_index('date')
+        out = [d for d in out if int(sub.loc[d, 'dta']) >= 0] if len(sub) else out
+    return out
+
+
+# =============================================================================
+# 11-C. 요금표 (앵커 → 칸 → 타입별 요금) — 데이터 없이도 항상 볼 수 있습니다
+# =============================================================================
+def _new_tab_ratecard():
+    st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
+    st.markdown(f"""
+<div class="renote"><b>이 탭은 재고와 무관한 '고정 자료'입니다.</b>
+사다리 16칸, 타입별 배수, 앵커 캘린더 84셀, 연휴·Floor 규칙 — 계산의 재료가 전부 여기 있습니다.
+날짜 계산이 어떻게 나왔는지 확인할 때 이 표와 대조하십시오. 판 <b>{NEW_EDITION}</b>.</div>
+""", unsafe_allow_html=True)
+
+    view = st.radio("표시 요금", ["로드(BAR) 정가", "회원 노출가 (x0.90)",
+                                "해외 랙 (x1.30)", "Flexible 하한 (x0.72)",
+                                "NRF 하한 (x0.66)"],
+                    horizontal=True, key="new_rc_view")
+    k = {"로드(BAR) 정가": 1.0, "회원 노출가 (x0.90)": NEW_MEMBER_K,
+         "해외 랙 (x1.30)": NEW_RACK_MULT, "Flexible 하한 (x0.72)": NEW_FLOOR_FLEX,
+         "NRF 하한 (x0.66)": NEW_FLOOR_NRF}[view]
+
+    # ── ① 타입별 x 16칸 요금표 ─────────────────────────────────────
+    st.markdown(_mx_title("① 객실타입별 16칸 요금표 — 행 = 객실 · 열 = 칸", True),
+                unsafe_allow_html=True)
+    h1 = ["<th class='rh' rowspan='2'>객실</th>"]
+    h2 = []
+    for i in range(1, NEW_N + 1):
+        bg, fg = new_color(i)
+        h1.append(f"<th style='background:{bg};color:{fg}'>{new_lab(i)}</th>")
+        h2.append(f"<th style='font-weight:400;color:#7d858c'>{i}</th>")
+    head = "<thead><tr>" + "".join(h1) + "</tr><tr>" + "".join(h2) + "</tr></thead>"
+    body = []
+    for rt in NEW_ROW_ORDER:
+        cls = "gend" if rt in NEW_GROUP_END else ""
+        cells = []
+        for i in range(1, NEW_N + 1):
+            v = new_k_price(rt, i, k) if k != 1.0 else new_load_price(rt, i)
+            cells.append(f"<td>{_won(v)}</td>")
+        body.append(
+            f"<tr class='{cls}'><td class='rh'>{rt}"
+            f"<em style='display:block;font-style:normal;font-size:9px;font-weight:400;"
+            f"color:#7d858c'>{NEW_ROOM_NAMES.get(rt,'')} · x{NEW_MULT[rt]:.3f}</em></td>"
+            + "".join(cells) + "</tr>")
+    st.markdown(NEW_MX_CSS + "<div class='mxwrap'><table class='mx'>" + head
+                + "<tbody>" + "".join(body) + "</tbody></table></div>",
+                unsafe_allow_html=True)
+    st.caption(f"칸 간격 8%. 왼쪽이 비쌉니다. 아래 숫자는 칸 인덱스(1~16)입니다. "
+               f"{view} 기준. 로드 정가는 발행된 타입별 요금표 그대로이고, "
+               f"파생 요금은 반올림 전 원가(칸 x 배수)에서 한 번만 천원 단위로 반올림합니다.")
+
+    # ── ② 앵커 캘린더 ─────────────────────────────────────────────
+    st.markdown(_mx_title("② 앵커 캘린더 84셀 — 행 = 월 · 열 = 요일 (시작 칸)", True),
+                unsafe_allow_html=True)
+    h = "<thead><tr><th class='rh'>월</th>" + "".join(
+        f"<th style=\"color:{'#D32F2F' if w==6 else ('#1565C0' if w==5 else '#333')}\">"
+        f"{WD_KR[w]}</th>" for w in range(7)) + "</tr></thead>"
+    rows = []
+    for m in range(1, 13):
+        cells = []
+        for w in range(7):
+            idx = NEW_ANCHOR[m][w]
+            bg, fg = new_color(idx)
+            price = new_k_price("HDT", idx, k) if k != 1.0 else new_load_price("HDT", idx)
+            cells.append(f"<td class='c3' style='background:{bg};color:{fg}'>"
+                         f"{new_lab(idx)}<em>{_won(price)}</em></td>")
+        rows.append(f"<tr><td class='rh'>{m}월</td>" + "".join(cells) + "</tr>")
+    st.markdown("<div class='mxwrap'><table class='mx'>" + h + "<tbody>"
+                + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
+    st.caption(f"셀 안의 금액은 HDT 기준 {view} 입니다. 다른 객실은 ① 표의 배수를 곱하십시오. "
+               f"이 표는 연도와 무관합니다 — 월 x 요일만 봅니다.")
+
+    # ── ③ 연휴 · Floor 규칙 ───────────────────────────────────────
+    st.markdown(_mx_title("③ 앵커 위에 올라가는 규칙"), unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**연휴 · 페이스 · 재고**")
+        st.dataframe(pd.DataFrame([
+            {"단계": "2 연휴", "조건": "공휴일 · 연휴", "조정": f"{NEW_HOLIDAY_STEP}칸 상향",
+             "배수": f"x{1.08**NEW_HOLIDAY_STEP:.3f}"},
+            {"단계": "3 페이스", "조건": "소진 배수 ≤ 0.25", "조정": "2칸 상향", "배수": "x1.166"},
+            {"단계": "3 페이스", "조건": "소진 배수 ≤ 0.50", "조정": "1칸 상향", "배수": "x1.080"},
+            {"단계": "3 페이스", "조건": "소진 배수 2.0 ~ 4.0", "조정": "1칸 하향", "배수": "x0.926"},
+            {"단계": "3 페이스", "조건": "소진 배수 > 4.0", "조정": "2칸 하향", "배수": "x0.857"},
+            {"단계": "4 재고", "조건": "총잔여율 ≤ 20%", "조정": "1칸 상향", "배수": "x1.080"},
+            {"단계": "4 재고", "조건": "총잔여율 ≤ 12%", "조정": "2칸 상향", "배수": "x1.166"},
+            {"단계": "4 재고", "조건": "총잔여율 ≤ 5%", "조정": "3칸 상향", "배수": "x1.260"},
+        ]), use_container_width=True, hide_index=True)
+        st.caption("페이스 상향은 D-44 이내, 하향은 D-21 이내에서만. "
+                   "총잔여율 25% 미만이면 하향 보류. 재고 단계는 리드타임 무관.")
+    with c2:
+        st.markdown("**Floor — 이 칸보다 싸게 못 내려갑니다**")
+        st.dataframe(pd.DataFrame([
+            {"종류": "Peak Event (Opening)", "대상": "추석 · 설날 핵심 3일",
+             "최소 칸": "B3", "HDT": _won(new_load_price("HDT", NEW_RI["3"]))},
+            {"종류": "Peak Event (Opening)", "대상": "10/1~10/5 · 한글날 연휴",
+             "최소 칸": "B3", "HDT": _won(new_load_price("HDT", NEW_RI["3"]))},
+            {"종류": "Peak Event (Opening)", "대상": "크리스마스 이브 (12/24)",
+             "최소 칸": "B3", "HDT": _won(new_load_price("HDT", NEW_RI["3"]))},
+            {"종류": "Peak Event (Opening)", "대상": "크리스마스 · 연휴 · 연말",
+             "최소 칸": "B2", "HDT": _won(new_load_price("HDT", NEW_RI["2"]))},
+            {"종류": "Scarcity (Absolute)", "대상": "총잔여율 ≤ 20%",
+             "최소 칸": "B4", "HDT": _won(new_load_price("HDT", NEW_RI["4"]))},
+            {"종류": "Scarcity (Absolute)", "대상": "총잔여율 ≤ 12%",
+             "최소 칸": "B3", "HDT": _won(new_load_price("HDT", NEW_RI["3"]))},
+            {"종류": "Scarcity (Absolute)", "대상": "총잔여율 ≤ 5%",
+             "최소 칸": "B1", "HDT": _won(new_load_price("HDT", NEW_RI["1"]))},
+        ]), use_container_width=True, hide_index=True)
+        st.caption("Opening 은 D-46 이상 하향 금지 · D-45 1회 재심사(3조건 + RM 승인, "
+                   "최대 1칸 완화). Absolute 는 자동 해제도 승인 완화도 없습니다.")
+
+    st.markdown("**객실타입 조정 (7단계)**")
+    st.dataframe(pd.DataFrame([
+        {"조건": "타입 잔여율 ≤ 15%", "조정": "2칸 상향"},
+        {"조건": "타입 잔여율 ≤ 30%", "조정": "1칸 상향"},
+        {"조건": "타입 잔여 ≥ 85% + 총잔여 ≥ 60% + D-44 이내", "조정": "2칸 하향 (GDB 제외)"},
+        {"조건": "타입 잔여 ≥ 70% + 총잔여 ≥ 40% + D-44 이내", "조정": "1칸 하향 (GDB 제외)"},
+        {"조건": "그날 총잔여율 ≤ 20%", "조정": "남은 타입 1칸 추가 상향 (희소재)"},
+        {"조건": "타입 잔여 0 이하", "조정": "판매 마감 — 요금은 참고값"},
+    ]), use_container_width=True, hide_index=True)
+    st.caption(f"하향은 B10(칸 {NEW_TYPE_RUNG_MAX})에서 멈춥니다 — B11~B13 은 자동 진입 금지 "
+               f"구간(승인 항목)입니다. 칸 B1 이상(칸 인덱스 {NEW_APPROVAL_RUNG} 이하)은 "
+               f"헤드룸으로 RM 승인 대상입니다.")
+
+
+# =============================================================================
+# 14. 탭 3 — 일자별 칸 (가로: 행 = 단계 · 열 = 날짜)
+# =============================================================================
+_STEP_ROWS = [
+    ("1 앵커",         'anchor_lab',  'mut'),
+    ("2 연휴 반영",     '_afterhol',   'mut'),
+    ("3 페이스",        '_pace',       ''),
+    ("4 재고",          '_inv',        ''),
+    ("소계 (floor 전)", 'pre_lab',     'mut'),
+    ("5 이벤트 floor",  'ev_floor',    ''),
+    ("6 희소 floor",    'sc_floor',    ''),
+]
+
+
 def _new_tab_days(day_df):
     if day_df is None or day_df.empty:
         st.info("리포트를 업로드하세요.")
         return
+    st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
 
-    show_all = st.checkbox("과거 날짜도 보기", value=False, key="new_days_past")
-    df = day_df if show_all else day_df[day_df['dta'] >= 0]
-    if df.empty:
-        st.warning("표시할 날짜가 없습니다.")
+    dates = _date_window(day_df, "new_days")
+    if not dates:
+        st.warning("표시할 날짜가 없습니다. 위에서 월을 선택하세요.")
         return
+    dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
 
-    head = ("<tr><th>일자</th><th>요일</th><th>D-</th><th>구간</th><th>연휴</th>"
-            "<th>1 앵커</th><th>2 연휴후</th><th>3 페이스</th><th>4 재고</th><th>소계</th>"
-            "<th>5 이벤트<br>floor</th><th>6 희소<br>floor</th><th>확정 칸</th>"
-            "<th>HDT 로드</th><th>HDT 회원가</th><th>총점유</th><th>총잔여</th></tr>")
-    body = []
-    for r in df.itertuples():
-        bg, fg = new_color(r.rung)
-        cls = "hol" if r.hol else ""
-        pace = "—" if r.pace_adj == 0 else ("▲%d" % -r.pace_adj if r.pace_adj < 0 else "▼%d" % r.pace_adj)
-        inv = "—" if r.inv_adj == 0 else "▲%d" % -r.inv_adj
-        ovm = " ✋" if r.is_override else ""
-        body.append(
-            f"<tr class='{cls}'>"
-            f"<td class='dt'>{r.date.strftime('%m/%d')}</td>"
-            f"<td>{r.dow}</td><td class='mut'>D-{r.dta}</td>"
-            f"<td class='mut' style='font-size:11px'>{r.zone}</td>"
-            f"<td class='l' style='font-size:11px'>{r.hol or '—'}</td>"
-            f"<td class='mut'>{r.anchor_lab}</td>"
-            f"<td class='mut'>{new_lab(r.after_hol)}</td>"
-            f"<td>{pace}</td><td>{inv}</td>"
-            f"<td class='mut'>{r.pre_lab}</td>"
-            f"<td>{r.ev_floor or '—'}</td><td>{r.sc_floor or '—'}</td>"
-            f"<td class='rg' style='background:{bg};color:{fg}'>{r.lab}{ovm}</td>"
-            f"<td>{_won(r.hdt_load)}</td><td><b>{_won(r.hdt_member)}</b></td>"
-            f"<td class='mut'>{'-' if r.occ != r.occ else '%.1f%%' % r.occ}</td>"
-            f"<td class='mut'>{_pct(r.remh)}</td></tr>")
-    st.markdown(NEW_CSS + "<div class='rewrap'><div class='rescroll'><table class='retbl'>"
-                "<thead>" + head + "</thead><tbody>" + "".join(body) +
-                "</tbody></table></div></div>", unsafe_allow_html=True)
-    st.caption("▲ = 비싼 칸으로, ▼ = 싼 칸으로. ✋ 는 수동 예외로 고정된 날입니다. "
-               "'소계'는 floor 적용 전 계산값이고, 확정 칸이 소계보다 비싸면 floor가 구속한 것입니다.")
+    st.markdown(_mx_title("일자별 확정 칸 — 행 = 단계 · 열 = 날짜", True),
+                unsafe_allow_html=True)
+    head = _mx_head(dates, dmap, "단계")
+
+    def _cell_val(r, field):
+        if field == '_afterhol':
+            return new_lab(int(r['after_hol']))
+        if field == '_pace':
+            v = int(r['pace_adj'])
+            return "—" if v == 0 else (f"▲{-v}" if v < 0 else f"▼{v}")
+        if field == '_inv':
+            v = int(r['inv_adj'])
+            return "—" if v == 0 else f"▲{-v}"
+        return str(r[field] or "—")
+
+    rows = []
+    # 연휴 이름
+    cells = []
+    for d in dates:
+        hol = str(dmap.loc[d, 'hol'] or "")
+        cells.append(f"<td class='mut' style='font-size:9px;"
+                     f"{'color:#B5602C;font-weight:700' if hol else ''}'>"
+                     f"{hol[:6] if hol else '—'}</td>")
+    rows.append("<tr><td class='rh'>연휴</td>" + "".join(cells) + "</tr>")
+    # 리드타임
+    cells = [f"<td class='mut'>D-{int(dmap.loc[d,'dta'])}</td>" for d in dates]
+    rows.append("<tr class='gend'><td class='rh'>리드타임</td>" + "".join(cells) + "</tr>")
+
+    for label, field, cls in _STEP_ROWS:
+        cells = []
+        for d in dates:
+            r = dmap.loc[d]
+            cells.append(f"<td class='{cls}'>{_cell_val(r, field)}</td>")
+        end = " gend" if field == 'sc_floor' else ""
+        rows.append(f"<tr class='{end.strip()}'><td class='rh'>{label}</td>"
+                    + "".join(cells) + "</tr>")
+
+    # 확정 칸 (색칠)
+    cells = []
+    for d in dates:
+        r = dmap.loc[d]
+        bg, fg = new_color(int(r['rung']))
+        mark = " ✋" if bool(r['is_override']) else ""
+        cells.append(f"<td style='background:{bg};color:{fg};font-weight:700'>"
+                     f"{r['lab']}{mark}</td>")
+    rows.append("<tr><td class='rh'>확정 칸</td>" + "".join(cells) + "</tr>")
+
+    for label, field in [("HDT 로드가", 'hdt_load'), ("HDT 회원가", 'hdt_member')]:
+        cells = [f"<td{' style=font-weight:700' if field=='hdt_member' else ''}>"
+                 f"{_won(dmap.loc[d, field])}</td>" for d in dates]
+        end = " gend" if field == 'hdt_member' else ""
+        rows.append(f"<tr class='{end.strip()}'><td class='rh'>{label}</td>"
+                    + "".join(cells) + "</tr>")
+
+    cells = []
+    for d in dates:
+        v = dmap.loc[d, 'occ']
+        cells.append(f"<td class='mut'>{'-' if v != v else '%.0f%%' % v}</td>")
+    rows.append("<tr><td class='rh'>총점유</td>" + "".join(cells) + "</tr>")
+    cells = [f"<td class='mut'>{_pct(_num(dmap.loc[d,'remh']), 0)}</td>" for d in dates]
+    rows.append("<tr><td class='rh'>총잔여율</td>" + "".join(cells) + "</tr>")
+    cells = [f"<td class='mut'>{_won(dmap.loc[d,'tot_avail'])}</td>" for d in dates]
+    rows.append("<tr><td class='rh'>잔여(실)</td>" + "".join(cells) + "</tr>")
+
+    st.markdown("<div class='mxwrap'><table class='mx'>" + head + "<tbody>"
+                + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
+    st.caption("▲ = 비싼 칸으로, ▼ = 싼 칸으로. ✋ 는 수동 예외로 고정된 날. "
+               "확정 칸이 '소계'보다 비싸면 floor 가 구속한 것입니다. "
+               "주황색 열 머리는 연휴입니다.")
+
+    with st.expander("📋 세로 상세 — floor 근거 · 재심사 판정까지", expanded=False):
+        df = day_df[day_df['date'].isin(dates)]
+        t = pd.DataFrame({
+            "일자": df['date'].map(lambda x: x.strftime('%Y-%m-%d')),
+            "요일": df['dow'], "D-": df['dta'].map(lambda x: f"D-{x}"),
+            "구간": df['zone'], "연휴": df['hol'].replace("", "—"),
+            "앵커": df['anchor_lab'], "페이스": df['pace_adj'], "재고": df['inv_adj'],
+            "소계": df['pre_lab'],
+            "이벤트 floor": df['ev_floor'].replace("", "—"),
+            "희소 floor": df['sc_floor'].replace("", "—"),
+            "확정 floor": df['floor'].replace("", "—"),
+            "floor 종류": df['floor_kind'].replace("", "—"),
+            "floor 근거": df['floor_by'].replace("", "—"),
+            "확정 칸": df['lab'],
+            "HDT 로드": df['hdt_load'], "HDT 회원가": df['hdt_member'],
+            "총점유(%)": _numcol(df['occ']).round(1),
+            "총잔여율(%)": _numcol(df['remh'], 100).round(1),
+            "재심사일": df['review_date'].replace("", "—"),
+            "재심사 판정": df['review'].replace("", "—"),
+        })
+        st.dataframe(t, use_container_width=True, hide_index=True, height=460)
 
 
 # =============================================================================
-# 15. 탭 4 — 타입별 칸 · 요금
+# 15. 탭 4 — 타입별 칸 · 요금 (가로: 행 = 객실 · 열 = 날짜)
 # =============================================================================
 def _new_tab_types(day_df, type_df):
     if type_df is None or type_df.empty:
         st.info("리포트를 업로드하세요.")
         return
+    st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
 
-    c1, c2, c3 = st.columns([2, 2, 2])
+    c1, c2 = st.columns([3, 2])
     with c1:
-        view = st.radio("표시 값", ["칸", "회원 노출가", "로드(BAR)가",
-                                  "해외 랙", "Flexible 하한", "NRF 하한"],
-                        horizontal=False, key="new_mtx_view")
+        view = st.radio("셀에 표시할 요금", ["회원 노출가", "로드(BAR)가", "해외 랙",
+                                       "Flexible 하한", "NRF 하한", "칸만"],
+                        horizontal=True, key="new_mtx_view")
     with c2:
-        rooms = st.multiselect("객실타입", NEW_ROOMS, default=NEW_ROOMS, key="new_mtx_rooms")
-    with c3:
-        show_all = st.checkbox("과거 날짜도 보기", value=False, key="new_mtx_past")
-        only_diff = st.checkbox("날짜 칸과 다른 셀만 강조", value=True, key="new_mtx_diff")
-
-    df = type_df if show_all else type_df[type_df['dta'] >= 0]
-    df = df[df['rt'].isin(rooms)]
-    if df.empty:
-        st.warning("표시할 데이터가 없습니다.")
+        rooms = st.multiselect("객실타입", NEW_ROW_ORDER, default=NEW_ROW_ORDER,
+                               key="new_mtx_rooms")
+    dates = _date_window(day_df, "new_mtx")
+    if not dates or not rooms:
+        st.warning("표시할 날짜 또는 객실이 없습니다.")
         return
 
-    field = {"칸": "lab", "회원 노출가": "member", "로드(BAR)가": "load",
-             "해외 랙": "rack", "Flexible 하한": "floor_flex",
-             "NRF 하한": "floor_nrf"}[view]
-    order = [r for r in NEW_ROOMS if r in rooms]
+    field = {"회원 노출가": 'member', "로드(BAR)가": 'load', "해외 랙": 'rack',
+             "Flexible 하한": 'floor_flex', "NRF 하한": 'floor_nrf',
+             "칸만": None}[view]
+    order = [r for r in NEW_ROW_ORDER if r in rooms]
     dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
+    tix = type_df.drop_duplicates(subset=['date', 'rt'], keep='first')
+    tix = tix.set_index(['date', 'rt'])
 
-    head = "<tr><th>일자</th><th>요일</th><th>날짜<br>칸</th>" + \
-        "".join(f"<th>{rt}<br><span style='font-weight:400;font-size:9px'>x{NEW_MULT[rt]:.3f}</span></th>"
-                for rt in order) + "</tr>"
-    body = []
-    for d, g in df.groupby('date'):
-        info = dmap.loc[d]
-        dbg, dfg = new_color(int(info['rung']))
+    st.markdown(_mx_title(f"객실타입별 확정 칸 · {view} — 행 = 객실 · 열 = 날짜", True),
+                unsafe_allow_html=True)
+    head = _mx_head(dates, dmap, "객실")
+    rows = []
+
+    # 맨 위: 날짜 칸 (그날의 기준)
+    cells = []
+    for d in dates:
+        r = dmap.loc[d]
+        bg, fg = new_color(int(r['rung']))
+        cells.append(f"<td class='c3' style='background:{bg};color:{fg};font-weight:700'>"
+                     f"{r['lab']}<em>{_won(r['hdt_member'])}</em></td>")
+    rows.append("<tr class='gend'><td class='rh'>날짜 칸 (기준)"
+                "<em style='display:block;font-style:normal;font-size:9px;"
+                "font-weight:400;color:#7d858c'>HDT 회원가</em></td>"
+                + "".join(cells) + "</tr>")
+
+    for rt in order:
+        cls = "gend" if rt in NEW_GROUP_END else ""
         cells = []
-        gi = g.set_index('rt')
-        gi = gi[~gi.index.duplicated(keep='first')]   # 중복 셀 방어 (.loc 이 Series를 돌려주도록)
-        for rt in order:
-            if rt not in gi.index:
+        for d in dates:
+            key = (d, rt)
+            if key not in tix.index:
                 cells.append("<td class='mut'>—</td>")
                 continue
-            row = gi.loc[rt]
-            if row['stop']:
-                cells.append(f"<td class='stop'>{row['state']}<em style='display:block;"
-                             f"font-size:9px'>{row['lab']}</em></td>")
+            row = tix.loc[key]
+            if bool(row['stop']):
+                cells.append(f"<td class='off c3'>{row['state']}"
+                             f"<em>{row['lab']}</em><i>{_won(row['avail'])}실</i></td>")
                 continue
             bg, fg = new_color(int(row['rung']))
-            diff = int(row['rung']) != int(info['rung'])
-            style = f"background:{bg};color:{fg}" if (diff or not only_diff) else "color:#5A636B"
-            val = row[field]
-            txt = val if field == 'lab' else _won(val)
-            sub = row['lab'] if field != 'lab' else _won(row['member'])
-            mark = "✋" if row['is_override'] else ("★" if row['approval'] else "")
-            cells.append(f"<td class='rg' style='{style}'>{txt}{mark}<em>{sub}</em></td>")
-        body.append(
-            f"<tr class='{'hol' if info['hol'] else ''}'>"
-            f"<td class='dt'>{d.strftime('%m/%d')}</td><td>{info['dow']}</td>"
-            f"<td class='rg' style='background:{dbg};color:{dfg}'>{info['lab']}</td>"
+            mark = "✋" if bool(row['is_override']) else (
+                "★" if row['approval'] else "")
+            if field is None:
+                main, sub = f"{row['lab']}{mark}", _won(row['member'])
+            else:
+                main, sub = _won(row[field]), f"{row['lab']}{mark}"
+            cells.append(f"<td class='c3' style='background:{bg};color:{fg};"
+                         f"font-weight:700'>{main}<em>{sub}</em>"
+                         f"<i style='color:{fg};opacity:.75'>{_won(row['avail'])}실</i></td>")
+        rows.append(
+            f"<tr class='{cls}'><td class='rh'>{rt}"
+            f"<em style='display:block;font-style:normal;font-size:9px;font-weight:400;"
+            f"color:#7d858c'>{NEW_ROOM_NAMES.get(rt,'')} · x{NEW_MULT[rt]:.3f}</em></td>"
             + "".join(cells) + "</tr>")
 
-    st.markdown(NEW_CSS + "<div class='rewrap'><div class='rescroll'><table class='retbl'>"
-                "<thead>" + head + "</thead><tbody>" + "".join(body) +
-                "</tbody></table></div></div>", unsafe_allow_html=True)
-    st.caption("작은 글씨는 칸 라벨(값 보기일 때) 또는 회원 노출가(칸 보기일 때)입니다. "
+    st.markdown("<div class='mxwrap'><table class='mx'>" + head + "<tbody>"
+                + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
+    st.caption("셀 = 요금 / 칸 / 잔여 3줄 (칸만 보기에서는 칸 / 회원가 / 잔여). "
                "★ = 칸 B1 이상 헤드룸(RM 승인 구간), ✋ = 수동 예외. "
-               "회색 셀은 잔여 0 이하 — 요금 조정이 아니라 판매를 닫아야 합니다.")
+               "회색 셀은 잔여 0 이하 — 요금 조정이 아니라 판매를 닫아야 합니다. "
+               "굵은 가로선은 메인 호텔동(~HDF) / 특수객실(~PPV) 블록 구분입니다.")
 
     st.divider()
-    st.markdown("##### 오늘 · 내일 판매 시트")
-    tgt = st.selectbox("날짜 선택", sorted(df['date'].unique()),
+    st.markdown("##### 날짜 하나 골라 보는 판매 시트")
+    tgt = st.selectbox("날짜", dates,
                        format_func=lambda x: f"{x.strftime('%Y-%m-%d')} ({WD_KR[x.weekday()]})",
                        key="new_sheet_date")
-    one = df[df['date'] == tgt].copy()
+    one = type_df[(type_df['date'] == tgt) & (type_df['rt'].astype(str).isin(rooms))].copy()
     if not one.empty:
         info = dmap.loc[tgt]
         st.markdown(
             f"**{tgt.strftime('%Y-%m-%d')} ({WD_KR[tgt.weekday()]})** · D-{int(info['dta'])} · "
             f"날짜 칸 **{info['lab']}** · 총점유 "
-            f"{'-' if info['occ'] != info['occ'] else '%.1f%%' % info['occ']} · 총잔여 {_pct(info['remh'])}"
+            f"{'-' if info['occ'] != info['occ'] else '%.1f%%' % info['occ']} · "
+            f"총잔여 {_pct(_num(info['remh']))}"
             + (f" · 연휴 {info['hol']}" if info['hol'] else "")
             + (f" · floor {info['floor']} ({info['floor_by']})" if info['floor_by'] else ""))
-        sheet = one[['rt', 'cap', 'avail', 'remt', 'lab', 'tadj', 'load', 'member',
-                     'rack', 'floor_flex', 'floor_nrf', 'state', 'approval', 'why']].copy()
-        sheet.insert(1, '객실명', sheet['rt'].map(NEW_ROOM_NAMES))
-        sheet['remt'] = _numcol(sheet['remt'], 100).round(1)
-        sheet.columns = ['객실', '객실명', '전체', '잔여', '잔여율(%)', '칸', '타입조정',
-                         '로드(BAR)', '회원 노출가', '해외 랙', 'Flex 하한', 'NRF 하한',
-                         '상태', '승인', '근거']
+        one['_o'] = one['rt'].astype(str).map({r: i for i, r in enumerate(NEW_ROW_ORDER)})
+        one = one.sort_values('_o')
+        sheet = pd.DataFrame({
+            "객실": one['rt'].astype(str),
+            "객실명": one['rt'].astype(str).map(NEW_ROOM_NAMES),
+            "전체": one['cap'], "잔여": one['avail'],
+            "잔여율(%)": _numcol(one['remt'], 100).round(1),
+            "칸": one['lab'], "타입조정": one['tadj'],
+            "로드(BAR)": one['load'], "회원 노출가": one['member'],
+            "해외 랙": one['rack'], "Flex 하한": one['floor_flex'],
+            "NRF 하한": one['floor_nrf'],
+            "상태": one['state'], "승인": one['approval'].replace("", "—"),
+            "근거": one['why'].replace("", "—"),
+        })
         st.dataframe(sheet, use_container_width=True, hide_index=True)
 
 
@@ -1835,12 +2196,15 @@ def _new_excel(day_df, type_df, day_cmp=None, type_cmp=None):
                          '해외 랙', 'Flex 하한', 'NRF 하한', '상태', '승인', '근거']
             t.to_excel(w, index=False, sheet_name="타입별 칸")
 
+            # ※ 매트릭스는 화면과 같은 방향으로 — 행 = 객실, 열 = 날짜
             for nm, fld in [("칸 매트릭스", 'lab'), ("회원 노출가 매트릭스", 'member'),
-                            ("로드 요금 매트릭스", 'load')]:
-                p = type_df.pivot_table(index='date', columns='rt', values=fld,
+                            ("로드 요금 매트릭스", 'load'), ("해외 랙 매트릭스", 'rack')]:
+                p = type_df.pivot_table(index='rt', columns='date', values=fld,
                                         aggfunc='first')
-                p = p.reindex(columns=[c for c in NEW_ROOMS if c in p.columns])
-                p.index = [x.strftime('%Y-%m-%d') for x in p.index]
+                p = p.reindex(index=[r for r in NEW_ROOMS if r in p.index])
+                p.columns = [f"{x.strftime('%m-%d')}({WD_KR[x.weekday()]})"
+                             for x in p.columns]
+                p.index.name = "객실"
                 p.to_excel(w, sheet_name=nm)
 
         if day_df is not None and not day_df.empty:
@@ -1856,17 +2220,34 @@ def _new_excel(day_df, type_df, day_cmp=None, type_cmp=None):
                 fl.to_excel(w, index=False, sheet_name="Floor 적용 내역")
 
         # 사다리 · 앵커 · 레이어
-        lad = pd.DataFrame({
-            "칸": [new_lab(i) for i in range(1, NEW_N + 1)],
-            **{rt: [NEW_TABLE[rt][NEW_LAB[i - 1]] for i in range(1, NEW_N + 1)]
-               for rt in NEW_ROOMS}
-        })
-        lad.to_excel(w, index=False, sheet_name="사다리 요금표")
+        # 사다리 요금표 — 행 = 객실, 열 = 칸 (화면 요금표 탭과 동일)
+        for nm, kk in [("요금표 로드(BAR)", 1.0), ("요금표 회원가", NEW_MEMBER_K),
+                       ("요금표 해외랙", NEW_RACK_MULT),
+                       ("요금표 Flex하한", NEW_FLOOR_FLEX),
+                       ("요금표 NRF하한", NEW_FLOOR_NRF)]:
+            lad = pd.DataFrame(
+                {new_lab(i): [(new_load_price(rt, i) if kk == 1.0
+                               else new_k_price(rt, i, kk)) for rt in NEW_ROOMS]
+                 for i in range(1, NEW_N + 1)},
+                index=NEW_ROOMS)
+            lad.insert(0, "객실명", [NEW_ROOM_NAMES.get(r, "") for r in NEW_ROOMS])
+            lad.insert(1, "배수", [NEW_MULT[r] for r in NEW_ROOMS])
+            lad.index.name = "객실"
+            lad.to_excel(w, sheet_name=nm)
 
+        # 앵커 캘린더 — 행 = 월, 열 = 요일
         anc = pd.DataFrame(
-            {WD_KR[i]: [new_lab(NEW_ANCHOR[m][i]) for m in range(1, 13)] for i in range(7)},
+            {WD_KR[i]: [new_lab(NEW_ANCHOR[m][i]) for m in range(1, 13)]
+             for i in range(7)},
             index=[f"{m}월" for m in range(1, 13)])
+        anc.index.name = "월"
         anc.to_excel(w, sheet_name="앵커 캘린더")
+        ancp = pd.DataFrame(
+            {WD_KR[i]: [new_load_price("HDT", NEW_ANCHOR[m][i]) for m in range(1, 13)]
+             for i in range(7)},
+            index=[f"{m}월" for m in range(1, 13)])
+        ancp.index.name = "월 (HDT 로드가)"
+        ancp.to_excel(w, sheet_name="앵커 캘린더 요금")
 
         lay = pd.DataFrame([{
             "레이어": nm, "목표계수 k": k, "회원 중첩": "O" if mem else "X",
@@ -1906,8 +2287,10 @@ def _new_excel(day_df, type_df, day_cmp=None, type_cmp=None):
 def _new_tab_download(day_df, type_df, day_cmp=None, type_cmp=None):
     st.markdown("""
 <div class="renote"><b>엑셀 한 파일에 전부 들어갑니다.</b>
-읽어주세요 / 일자별 칸 / 타입별 칸 / 칸·회원가·로드가 매트릭스 / Floor 내역 /
-사다리 요금표 / 앵커 캘린더 / 할인 레이어 (+ 이전 기록이 있으면 이전 대비 변화 · 타입별 변화).</div>
+읽어주세요 / 일자별 칸 / 타입별 칸 / <b>매트릭스 4종</b>(칸 · 회원가 · 로드가 · 해외랙 —
+모두 행 = 객실 · 열 = 날짜) / Floor 내역 / <b>요금표 5종</b>(로드 · 회원가 · 해외랙 ·
+Flex하한 · NRF하한) / 앵커 캘린더 2종 / 할인 레이어
+(+ 이전 기록이 있으면 이전 대비 변화 · 타입별 변화).</div>
 """, unsafe_allow_html=True)
     if day_df is None or day_df.empty:
         st.info("리포트를 업로드하세요.")
@@ -1962,10 +2345,12 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
         st.warning("재고 데이터가 없습니다. 왼쪽 사이드바에서 리포트를 올리거나 "
                    "DB 최신 스냅샷을 불러오십시오. 메인 페이지에서 올린 데이터도 "
                    "그대로 넘어옵니다.")
-        tabs = st.tabs(["📐 규칙 & 목표", "🏷️ 할인 레이어"])
+        tabs = st.tabs(["📐 규칙 & 요약", "📋 요금표", "🏷️ 할인 레이어"])
         with tabs[0]:
             _safe(_new_tab_rules, None, None, today)
         with tabs[1]:
+            _safe(_new_tab_ratecard)
+        with tabs[2]:
             _safe(_new_tab_promo, None, promotions, channel_list)
         return
 
@@ -2026,22 +2411,24 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
         chg_label = f"📈 이전 대비 변화 ({chg['moved_days']})"
     tabs = st.tabs([
         "📐 규칙 & 요약", chg_label, "📅 일자별 칸", "🛏️ 타입별 칸 · 요금",
-        "🛡️ Floor & 재심사", "🏷️ 할인 레이어 · 채널가",
+        "📋 요금표", "🛡️ Floor & 재심사", "🏷️ 할인 레이어 · 채널가",
         "✋ 예외 설정", "📥 다운로드",
     ])
     with tabs[0]:
         _safe(_new_tab_rules, day_df, type_df, today)
     with tabs[1]:
-        _safe(_new_tab_change, day_cmp, type_cmp, chg, compare_label)
+        _safe(_new_tab_change, day_cmp, type_cmp, chg, compare_label, day_df)
     with tabs[2]:
         _safe(_new_tab_days, day_df)
     with tabs[3]:
         _safe(_new_tab_types, day_df, type_df)
     with tabs[4]:
-        _safe(_new_tab_floor, day_df)
+        _safe(_new_tab_ratecard)
     with tabs[5]:
-        _safe(_new_tab_promo, type_df, promotions, channel_list)
+        _safe(_new_tab_floor, day_df)
     with tabs[6]:
-        _safe(_new_tab_override, day_df, type_df, db, today)
+        _safe(_new_tab_promo, type_df, promotions, channel_list)
     with tabs[7]:
+        _safe(_new_tab_override, day_df, type_df, db, today)
+    with tabs[8]:
         _safe(_new_tab_download, day_df, type_df, day_cmp, type_cmp)
