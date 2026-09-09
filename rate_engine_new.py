@@ -598,6 +598,16 @@ def new_compute_days(curr_df, prev_df=None, today=None, overrides=None):
 
     inv = new_hotel_inventory(curr_df)
     pk = new_pickup_map(curr_df, prev_df)
+
+    # ── 이전 기록이 현재와 완전히 같은 경우 방어 ────────────────────
+    #  같은 스냅샷을 '이전 기록'으로 붙이면 모든 셀의 판매가 0이 됩니다.
+    #  그건 "어제 하나도 안 팔렸다"가 아니라 "시간이 흐르지 않았다"입니다.
+    #  픽업 0을 그대로 쓰면 소진예상일이 무한히 길어져 페이스가 전부 하향으로
+    #  기울기 때문에, 이 경우엔 페이스를 아예 판단 불가로 둡니다.
+    prev_stale = bool(pk) and len(pk) >= 20 and all(v == 0 for v in pk.values())
+    if prev_stale:
+        pk = {}
+
     dates = sorted(inv.keys())
     years = sorted({d.year for d in dates}) or [today.year]
     HOL = new_holiday_map(tuple(years))
@@ -686,6 +696,7 @@ def new_compute_days(curr_df, prev_df=None, today=None, overrides=None):
             review=rev, review_date=revd,
             rung=rung, lab=new_lab(rung), is_override=is_ov,
             hdt_load=new_load_price("HDT", rung), hdt_member=new_member_price("HDT", rung),
+            prev_stale=prev_stale,
         ))
     return pd.DataFrame(rows)
 
@@ -1049,8 +1060,217 @@ app.py 는 한 글자도 고치지 않았습니다. 두 로직은 사다리·요
     st.caption("칸 간격 8%. 왼쪽이 비쌉니다. B11~B13은 자동 진입 금지 구간(승인 항목)입니다.")
 
 
+
 # =============================================================================
-# 13. 탭 2 — 일자별 칸
+# 13. 이전 기록 대비 자동 비교
+# -----------------------------------------------------------------------------
+# 기존 앱의 "자동 DB 병합/비교"와 같은 개념입니다. 리포트를 올리면 직전 스냅샷을
+# 이전 기록으로 잡고, 그 사이에 재고가 얼마나 빠졌는지 → 그래서 칸을 바꿔야 하는
+# 날이 어디인지를 보여줍니다.
+#
+# 표기 주의
+#   '이전 칸' = 그 스냅샷 하나만 보고 정했을 칸 (그 시점엔 더 이전 기록이 없으니
+#              페이스 단계는 0). '현재 칸' = 지금 확정 칸 (페이스 포함).
+#              그래서 차이에는 '재고가 빠진 효과'와 '페이스 효과'가 함께 들어 있고,
+#              어느 쪽이 움직였는지는 '페이스' 열로 갈라 볼 수 있습니다.
+# =============================================================================
+def new_compute_change(curr_df, prev_df, day_df, type_df, today=None):
+    """반환: (day_cmp, type_cmp, summary). prev 가 없으면 (빈, 빈, {})."""
+    empty = (pd.DataFrame(), pd.DataFrame(), {})
+    if prev_df is None or prev_df.empty or day_df is None or day_df.empty:
+        return empty
+    if not {'Date', 'RoomID', 'Available', 'Total'} <= set(prev_df.columns):
+        return empty
+    if today is None:
+        today = date.today()
+
+    try:
+        prev_day = new_compute_days(prev_df, None, today=today)
+        prev_type = new_compute_types(prev_df, prev_day, today=today)
+    except Exception:
+        return empty
+    if prev_day.empty:
+        return empty
+
+    # ── 날짜 단위 ────────────────────────────────────────────────
+    p = prev_day[['date', 'rung', 'lab', 'tot_avail', 'remh', 'occ']].rename(columns={
+        'rung': 'p_rung', 'lab': 'p_lab', 'tot_avail': 'p_avail',
+        'remh': 'p_remh', 'occ': 'p_occ'})
+    d = day_df[['date', 'dow', 'dta', 'hol', 'anchor_lab', 'pace_adj', 'pace_ratio',
+                'inv_adj', 'pre_lab', 'floor', 'floor_by', 'rung', 'lab',
+                'tot_avail', 'remh', 'occ', 'hdt_member']]
+    dc = d.merge(p, on='date', how='inner')
+    if dc.empty:
+        return empty
+    dc['sold'] = dc['p_avail'] - dc['tot_avail']          # 그 사이 판매 실수
+    dc['rung_move'] = dc['p_rung'] - dc['rung']           # + 면 비싼 칸으로 올라감
+    dc['occ_move'] = dc['occ'] - dc['p_occ']
+    dc = dc.sort_values('date').reset_index(drop=True)
+
+    # ── 타입 단위 ────────────────────────────────────────────────
+    tc = pd.DataFrame()
+    if type_df is not None and not type_df.empty and not prev_type.empty:
+        pt = prev_type[['date', 'rt', 'rung', 'lab', 'avail', 'member', 'state']].rename(
+            columns={'rung': 'p_rung', 'lab': 'p_lab', 'avail': 'p_avail',
+                     'member': 'p_member', 'state': 'p_state'})
+        cur = type_df[['date', 'dow', 'dta', 'rt', 'avail', 'cap', 'remt', 'rung',
+                       'lab', 'load', 'member', 'state']]
+        tc = cur.merge(pt, on=['date', 'rt'], how='inner')
+        if not tc.empty:
+            tc['sold'] = tc['p_avail'] - tc['avail']
+            tc['rung_move'] = tc['p_rung'] - tc['rung']
+            tc['price_move'] = tc['member'] - tc['p_member']
+            tc = tc.sort_values(['date', 'rt']).reset_index(drop=True)
+
+    stale = bool(len(dc)) and bool((dc['sold'].fillna(0) == 0).all())
+    sold_total = float(dc['sold'].fillna(0).sum())
+    moved = dc[dc['rung_move'] != 0]
+    summary = {
+        'days': int(len(dc)),
+        'sold_total': sold_total,
+        'sold_days': int((dc['sold'].fillna(0) > 0).sum()),
+        'moved_days': int(len(moved)),
+        'moved_up': int((dc['rung_move'] > 0).sum()),
+        'moved_down': int((dc['rung_move'] < 0).sum()),
+        'pace_up': int((dc['pace_adj'] < 0).sum()),
+        'pace_down': int((dc['pace_adj'] > 0).sum()),
+        'type_cells': int(len(tc)),
+        'type_moved': int((tc['rung_move'] != 0).sum()) if not tc.empty else 0,
+        'stale': stale,
+    }
+    return dc, tc, summary
+
+
+def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
+    if not summary:
+        st.markdown("""
+<div class="renote warn"><b>비교할 이전 기록이 없습니다.</b>
+리포트를 올리면 DB에 저장된 <b>가장 최근 스냅샷</b>을 이전 기록으로 자동으로 잡아
+그 사이 재고 변화와 칸 변화를 여기 보여줍니다. 기존 앱의 "자동 DB 병합/비교"와 같습니다.<br><br>
+지금 비어 있는 이유는 보통 셋 중 하나입니다.
+<b>①</b> 아직 저장된 스냅샷이 없다 (첫 사용) —
+<b>②</b> 사이드바에서 데이터를 직접 불러와 이전 기록이 안 붙었다 (
+<code>🔄 최신 스냅샷을 이전 기록으로</code> 를 누르면 붙습니다) —
+<b>③</b> 이전 스냅샷과 현재 데이터의 날짜가 안 겹친다.<br>
+이전 기록이 없어도 앵커 · 연휴 · 재고 · Floor 는 정상 작동합니다. 페이스 단계만 0입니다.</div>
+""", unsafe_allow_html=True)
+        return
+
+    if compare_label:
+        st.markdown(f"<div class='renote'><b>비교 기준</b> — {compare_label}</div>",
+                    unsafe_allow_html=True)
+
+    if summary.get('stale'):
+        st.markdown(
+            "<div class='renote stop'><b>⚠️ 이전 기록이 현재 데이터와 동일합니다.</b> "
+            "판매가 전부 0이라 비교가 의미 없습니다. 페이스 단계는 0으로 두었습니다. "
+            "다른 날 저장된 스냅샷을 이전 기록으로 잡으십시오.</div>",
+            unsafe_allow_html=True)
+
+    s = summary
+    c = st.columns(6)
+    c[0].metric("그 사이 판매", f"{s['sold_total']:,.0f}실")
+    c[1].metric("움직인 날", f"{s['sold_days']}일 / {s['days']}일")
+    c[2].metric("칸이 바뀐 날", f"{s['moved_days']}일",
+                f"↑{s['moved_up']} / ↓{s['moved_down']}")
+    c[3].metric("페이스 발동", f"↑{s['pace_up']} / ↓{s['pace_down']}")
+    c[4].metric("칸이 바뀐 셀", f"{s['type_moved']:,}")
+    c[5].metric("비교 셀", f"{s['type_cells']:,}")
+
+    if s['moved_days'] == 0:
+        st.success("이전 기록 대비 칸이 바뀐 날이 없습니다. 요금을 손댈 필요가 없습니다.")
+    else:
+        st.markdown("##### 🔔 요금을 바꿔야 하는 날")
+        st.caption("이전 기록만 보고 정했을 칸과 지금 확정 칸이 다른 날입니다. "
+                   "'재고' 열이 움직였으면 재고가 빠져서, '페이스' 열이 움직였으면 "
+                   "판매 속도 때문입니다.")
+        mv = day_cmp[day_cmp['rung_move'] != 0].copy()
+        head = ("<tr><th>일자</th><th>요일</th><th>D-</th><th>연휴</th>"
+                "<th>이전 잔여</th><th>현재 잔여</th><th>판매</th>"
+                "<th>페이스</th><th>재고</th><th>floor</th>"
+                "<th>이전 칸</th><th>현재 칸</th><th>이동</th>"
+                "<th>HDT 회원가</th></tr>")
+        body = []
+        for r in mv.itertuples():
+            bg, fg = new_color(r.rung)
+            pbg, pfg = new_color(r.p_rung)
+            arrow = ("▲%d" % r.rung_move) if r.rung_move > 0 else ("▼%d" % -r.rung_move)
+            acol = "#C62828" if r.rung_move > 0 else "#1565C0"
+            pace = "—" if r.pace_adj == 0 else (
+                "▲%d" % -r.pace_adj if r.pace_adj < 0 else "▼%d" % r.pace_adj)
+            inv = "—" if r.inv_adj == 0 else "▲%d" % -r.inv_adj
+            body.append(
+                f"<tr class='{'hol' if r.hol else ''}'>"
+                f"<td class='dt'>{r.date.strftime('%m/%d')}</td><td>{r.dow}</td>"
+                f"<td class='mut'>D-{r.dta}</td>"
+                f"<td class='l' style='font-size:11px'>{r.hol or '—'}</td>"
+                f"<td class='mut'>{_won(r.p_avail)}</td><td class='mut'>{_won(r.tot_avail)}</td>"
+                f"<td><b>{_won(r.sold)}</b></td>"
+                f"<td>{pace}</td><td>{inv}</td><td>{r.floor or '—'}</td>"
+                f"<td class='rg' style='background:{pbg};color:{pfg}'>{r.p_lab}</td>"
+                f"<td class='rg' style='background:{bg};color:{fg}'>{r.lab}</td>"
+                f"<td style='color:{acol};font-weight:700'>{arrow}</td>"
+                f"<td><b>{_won(r.hdt_member)}</b></td></tr>")
+        st.markdown(NEW_CSS + "<div class='rewrap'><div class='rescroll'>"
+                    "<table class='retbl'><thead>" + head + "</thead><tbody>"
+                    + "".join(body) + "</tbody></table></div></div>",
+                    unsafe_allow_html=True)
+
+    st.divider()
+    st.markdown("##### 날짜별 재고 변화 (전체)")
+    only_moved = st.checkbox("재고가 움직인 날만", value=True, key="new_chg_only")
+    dv = day_cmp[day_cmp['sold'].fillna(0) != 0] if only_moved else day_cmp
+    if dv.empty:
+        st.info("표시할 날짜가 없습니다.")
+    else:
+        t = pd.DataFrame({
+            "일자": dv['date'].map(lambda x: x.strftime('%Y-%m-%d')),
+            "요일": dv['dow'], "D-": dv['dta'].map(lambda x: f"D-{x}"),
+            "연휴": dv['hol'].replace("", "—"),
+            "이전 잔여": dv['p_avail'], "현재 잔여": dv['tot_avail'],
+            "판매(실)": dv['sold'],
+            "이전 총점유(%)": dv['p_occ'].round(1), "현재 총점유(%)": dv['occ'].round(1),
+            "점유 변화(%p)": dv['occ_move'].round(1),
+            "소진 배수": dv['pace_ratio'].round(2),
+            "페이스": dv['pace_adj'], "재고": dv['inv_adj'],
+            "이전 칸": dv['p_lab'], "현재 칸": dv['lab'], "이동": dv['rung_move'],
+        })
+        st.dataframe(t, use_container_width=True, hide_index=True, height=420)
+        st.caption("소진 배수 = 소진예상일 ÷ 남은 일수. 1보다 작으면 남은 시간보다 빨리 "
+                   "팔린다는 뜻이고, 0.50 이하부터 페이스가 칸을 올립니다. "
+                   "페이스·재고 열의 음수는 비싼 칸 방향입니다.")
+
+    if type_cmp is not None and not type_cmp.empty:
+        st.divider()
+        st.markdown("##### 객실타입별 변화")
+        mode = st.radio("표시", ["칸이 바뀐 셀만", "재고가 움직인 셀만", "전체"],
+                        horizontal=True, key="new_chg_tmode")
+        if mode == "칸이 바뀐 셀만":
+            tv = type_cmp[type_cmp['rung_move'] != 0]
+        elif mode == "재고가 움직인 셀만":
+            tv = type_cmp[type_cmp['sold'].fillna(0) != 0]
+        else:
+            tv = type_cmp
+        if tv.empty:
+            st.info("해당 조건의 셀이 없습니다.")
+        else:
+            t = pd.DataFrame({
+                "일자": tv['date'].map(lambda x: x.strftime('%Y-%m-%d')),
+                "요일": tv['dow'], "D-": tv['dta'].map(lambda x: f"D-{x}"),
+                "객실": tv['rt'].astype(str),
+                "전체": tv['cap'], "이전 잔여": tv['p_avail'], "현재 잔여": tv['avail'],
+                "판매(실)": tv['sold'],
+                "잔여율(%)": (tv['remt'] * 100).round(1),
+                "이전 칸": tv['p_lab'], "현재 칸": tv['lab'], "이동": tv['rung_move'],
+                "이전 회원가": tv['p_member'], "현재 회원가": tv['member'],
+                "요금 차이": tv['price_move'],
+                "상태": tv['state'],
+            })
+            st.dataframe(t, use_container_width=True, hide_index=True, height=440)
+
+
+# =============================================================================
+# 14. 탭 3 — 일자별 칸
 # =============================================================================
 def _new_tab_days(day_df):
     if day_df is None or day_df.empty:
@@ -1097,7 +1317,7 @@ def _new_tab_days(day_df):
 
 
 # =============================================================================
-# 14. 탭 3 — 타입별 칸 · 요금
+# 15. 탭 4 — 타입별 칸 · 요금
 # =============================================================================
 def _new_tab_types(day_df, type_df):
     if type_df is None or type_df.empty:
@@ -1192,7 +1412,7 @@ def _new_tab_types(day_df, type_df):
 
 
 # =============================================================================
-# 15. 탭 4 — Floor & 재심사
+# 16. 탭 5 — Floor & 재심사
 # =============================================================================
 def _new_tab_floor(day_df):
     if day_df is None or day_df.empty:
@@ -1271,7 +1491,7 @@ def _new_tab_floor(day_df):
 
 
 # =============================================================================
-# 16. 탭 5 — 할인 레이어 · 채널 판매가
+# 17. 탭 6 — 할인 레이어 · 채널 판매가
 # =============================================================================
 def _new_tab_promo(type_df, promotions, channel_list):
     st.markdown(f"""
@@ -1409,7 +1629,7 @@ def _new_tab_promo(type_df, promotions, channel_list):
 
 
 # =============================================================================
-# 17. 탭 6 — 신 로직 예외 설정
+# 18. 탭 7 — 신 로직 예외 설정
 # =============================================================================
 def _new_tab_override(day_df, type_df, db, today):
     st.markdown("""
@@ -1507,9 +1727,9 @@ def _new_tab_override(day_df, type_df, db, today):
 
 
 # =============================================================================
-# 18. 탭 7 — 다운로드
+# 19. 탭 8 — 다운로드
 # =============================================================================
-def _new_excel(day_df, type_df):
+def _new_excel(day_df, type_df, day_cmp=None, type_cmp=None):
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
         # 읽어주세요
@@ -1601,19 +1821,42 @@ def _new_excel(day_df, type_df):
         } for nm, k, mem, pt, flo in NEW_LAYERS])
         lay.to_excel(w, index=False, sheet_name="할인 레이어")
 
+        if day_cmp is not None and not day_cmp.empty:
+            dv = day_cmp.copy()
+            dv['date'] = dv['date'].map(lambda x: x.strftime('%Y-%m-%d'))
+            dv = dv[['date', 'dow', 'dta', 'hol', 'p_avail', 'tot_avail', 'sold',
+                     'p_occ', 'occ', 'occ_move', 'pace_ratio', 'pace_adj', 'inv_adj',
+                     'p_lab', 'lab', 'rung_move', 'hdt_member']]
+            dv.columns = ['일자', '요일', 'D-', '연휴', '이전 잔여', '현재 잔여', '판매(실)',
+                          '이전 총점유(%)', '현재 총점유(%)', '점유 변화(%p)', '소진 배수',
+                          '페이스', '재고', '이전 칸', '현재 칸', '칸 이동', 'HDT 회원가']
+            dv.to_excel(w, index=False, sheet_name="이전 대비 변화")
+
+        if type_cmp is not None and not type_cmp.empty:
+            tv = type_cmp.copy()
+            tv['date'] = tv['date'].map(lambda x: x.strftime('%Y-%m-%d'))
+            tv['rt'] = tv['rt'].astype(str)
+            tv = tv[['date', 'dow', 'dta', 'rt', 'cap', 'p_avail', 'avail', 'sold',
+                     'remt', 'p_lab', 'lab', 'rung_move', 'p_member', 'member',
+                     'price_move', 'state']]
+            tv.columns = ['일자', '요일', 'D-', '객실', '전체', '이전 잔여', '현재 잔여',
+                          '판매(실)', '잔여율', '이전 칸', '현재 칸', '칸 이동',
+                          '이전 회원가', '현재 회원가', '요금 차이', '상태']
+            tv.to_excel(w, index=False, sheet_name="타입별 변화")
+
     return buf.getvalue()
 
 
-def _new_tab_download(day_df, type_df):
+def _new_tab_download(day_df, type_df, day_cmp=None, type_cmp=None):
     st.markdown("""
 <div class="renote"><b>엑셀 한 파일에 전부 들어갑니다.</b>
 읽어주세요 / 일자별 칸 / 타입별 칸 / 칸·회원가·로드가 매트릭스 / Floor 내역 /
-사다리 요금표 / 앵커 캘린더 / 할인 레이어.</div>
+사다리 요금표 / 앵커 캘린더 / 할인 레이어 (+ 이전 기록이 있으면 이전 대비 변화 · 타입별 변화).</div>
 """, unsafe_allow_html=True)
     if day_df is None or day_df.empty:
         st.info("리포트를 업로드하세요.")
         return
-    data = _new_excel(day_df, type_df)
+    data = _new_excel(day_df, type_df, day_cmp, type_cmp)
     st.download_button(
         "📥 신 요금로직 적용표 다운로드", data=data,
         file_name=f"AmberPureHill_NewRate_Apply_{date.today().strftime('%Y%m%d')}.xlsx",
@@ -1625,10 +1868,10 @@ def _new_tab_download(day_df, type_df):
 
 
 # =============================================================================
-# 19. 진입점
+# 20. 진입점
 # =============================================================================
 def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=None,
-                today=None):
+                today=None, compare_label=""):
     """pages/ 아래 페이지가 이 함수 하나만 부릅니다. app.py 와는 완전히 무관합니다."""
     if today is None:
         today = date.today()
@@ -1668,26 +1911,66 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
         st.warning("계산할 날짜가 없습니다.")
         return
 
+    # ── 이전 기록 대비 자동 비교 ──────────────────────────────
+    try:
+        day_cmp, type_cmp, chg = new_compute_change(curr_df, prev_df, day_df,
+                                                    type_df, today=today)
+    except Exception as e:
+        day_cmp, type_cmp, chg = pd.DataFrame(), pd.DataFrame(), {}
+        st.warning(f"이전 기록 비교 실패 — 나머지는 정상 계산됩니다. ({e})")
+
+    if chg and chg.get('stale'):
+        st.markdown(
+            "<div class='renote stop'><b>⚠️ 이전 기록이 현재 데이터와 완전히 같습니다.</b> "
+            "모든 날짜의 판매가 0으로 잡혔습니다 — 같은 스냅샷을 '이전 기록'으로 "
+            "붙였을 가능성이 큽니다. 이 상태에서는 판매 속도를 알 수 없으므로 "
+            "<b>페이스 단계를 0으로 두고</b> 앵커 · 연휴 · 재고 · Floor 만으로 계산했습니다. "
+            "제대로 비교하려면 <b>다른 날 저장된</b> 스냅샷을 이전 기록으로 잡거나, "
+            "새 리포트를 올리십시오.</div>", unsafe_allow_html=True)
+    elif chg:
+        if chg['moved_days']:
+            st.markdown(
+                f"<div class='renote warn'><b>🔔 이전 기록 대비 칸이 바뀐 날 "
+                f"{chg['moved_days']}일</b> (비싼 칸 {chg['moved_up']} · 싼 칸 "
+                f"{chg['moved_down']}) — 그 사이 {chg['sold_total']:,.0f}실 팔렸습니다. "
+                f"<b>2번 탭</b>에서 어느 날 요금을 바꿔야 하는지 확인하십시오."
+                + (f"<br><span style='color:#78848F'>비교 기준: {compare_label}</span>"
+                   if compare_label else "") + "</div>",
+                unsafe_allow_html=True)
+        else:
+            st.success(f"이전 기록 대비 칸이 바뀐 날이 없습니다 "
+                       f"(그 사이 {chg['sold_total']:,.0f}실 판매)."
+                       + (f" · {compare_label}" if compare_label else ""))
+    elif prev_df is None or (hasattr(prev_df, 'empty') and prev_df.empty):
+        st.info("이전 기록이 없어 자동 비교와 페이스 단계가 비어 있습니다. "
+                "사이드바의 `🔄 최신 스냅샷을 이전 기록으로` 를 누르거나 "
+                "리포트를 올리면 붙습니다. (앵커·연휴·재고·Floor 는 정상)")
+
     n_ov = len(ov)
     if n_ov:
         st.info(f"✋ 예외 {n_ov}일이 적용된 상태입니다. (6번 탭에서 관리)")
 
+    chg_label = "📈 이전 대비 변화"
+    if chg and chg.get('moved_days'):
+        chg_label = f"📈 이전 대비 변화 ({chg['moved_days']})"
     tabs = st.tabs([
-        "📐 규칙 & 요약", "📅 일자별 칸", "🛏️ 타입별 칸 · 요금",
+        "📐 규칙 & 요약", chg_label, "📅 일자별 칸", "🛏️ 타입별 칸 · 요금",
         "🛡️ Floor & 재심사", "🏷️ 할인 레이어 · 채널가",
         "✋ 예외 설정", "📥 다운로드",
     ])
     with tabs[0]:
         _new_tab_rules(day_df, type_df, today)
     with tabs[1]:
-        _new_tab_days(day_df)
+        _new_tab_change(day_cmp, type_cmp, chg, compare_label)
     with tabs[2]:
-        _new_tab_types(day_df, type_df)
+        _new_tab_days(day_df)
     with tabs[3]:
-        _new_tab_floor(day_df)
+        _new_tab_types(day_df, type_df)
     with tabs[4]:
-        _new_tab_promo(type_df, promotions, channel_list)
+        _new_tab_floor(day_df)
     with tabs[5]:
-        _new_tab_override(day_df, type_df, db, today)
+        _new_tab_promo(type_df, promotions, channel_list)
     with tabs[6]:
-        _new_tab_download(day_df, type_df)
+        _new_tab_override(day_df, type_df, db, today)
+    with tabs[7]:
+        _new_tab_download(day_df, type_df, day_cmp, type_cmp)
