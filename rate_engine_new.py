@@ -591,6 +591,11 @@ def new_compute_days(curr_df, prev_df=None, today=None, overrides=None):
         today = date.today()
     overrides = overrides or {}
 
+    # ※ (날짜, 객실) 중복행 방어 — 겹쳐 올린 업로드가 호텔 재고를 두 배로 세지 않게.
+    if curr_df is not None and not curr_df.empty \
+            and {'Date', 'RoomID'} <= set(curr_df.columns):
+        curr_df = curr_df.drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+
     inv = new_hotel_inventory(curr_df)
     pk = new_pickup_map(curr_df, prev_df)
     dates = sorted(inv.keys())
@@ -696,17 +701,21 @@ def new_compute_types(curr_df, day_df, today=None, overrides=None):
     if day_df is None or day_df.empty or curr_df is None or curr_df.empty:
         return pd.DataFrame()
 
-    base = day_df.set_index('date')
+    base = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
+    # ※ (날짜, 객실) 중복행 방어. 업로드를 겹쳐 올리면 같은 셀이 두 번 들어오는데,
+    #   그대로 두면 아래 표 렌더에서 .loc 이 Series 대신 DataFrame 을 돌려줘
+    #   "The truth value of a Series is ambiguous" 로 화면이 죽습니다.
+    src = curr_df.drop_duplicates(subset=['Date', 'RoomID'], keep='first')
     rows = []
-    for _, r in curr_df.iterrows():
+    for _, r in src.iterrows():
         d = r['Date']
         rt = r['RoomID']
+        rt = str(rt).strip().upper() if rt is not None else ""
         if d not in base.index or rt not in NEW_TABLE:
             continue
         info = base.loc[d]
         dbase = int(info['rung'])
-        remh = info['remh']
-        remh = float(remh) if remh == remh else None
+        remh = _num(info['remh'])      # None 도 NaN 도 여기서 None 이 됩니다
         dta = int(info['dta'])
 
         cap = _num(r.get('Total'))
@@ -874,6 +883,45 @@ def _pct(v, nd=1):
     if v is None or v != v:
         return "-"
     return ("{:." + str(nd) + "f}%").format(v * 100)
+
+
+def _numf(v, default=0.0):
+    """어떤 값이든 안전하게 float 으로. None · NaN · 빈칸 · 문자열 모두 default.
+
+    ※ 이 함수가 필요한 이유: 파이썬에서 NaN 은 참(truthy)입니다.
+      `float(x) or 0` 은 NaN 을 걸러내지 못하고 그대로 통과시키고,
+      그 NaN 이 int(round(...)) 에 닿는 순간 ValueError 로 화면이 죽습니다.
+      이지에디터·업로드 데이터의 빈 칸은 전부 NaN 으로 들어옵니다.
+    """
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        try:
+            f = float(str(v).replace(",", "").replace("%", "").strip())
+        except (TypeError, ValueError):
+            return default
+    if f != f or f in (float('inf'), float('-inf')):   # NaN · inf
+        return default
+    return f
+
+
+def _txt(v, default=""):
+    """None · NaN · 'nan' 을 걸러낸 문자열."""
+    if v is None:
+        return default
+    try:
+        if v != v:          # NaN
+            return default
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    if s.lower() in ("", "nan", "none"):
+        return default
+    return s
 
 
 NEW_CSS = """
@@ -1077,7 +1125,7 @@ def _new_tab_types(day_df, type_df):
              "해외 랙": "rack", "Flexible 하한": "floor_flex",
              "NRF 하한": "floor_nrf"}[view]
     order = [r for r in NEW_ROOMS if r in rooms]
-    dmap = day_df.set_index('date')
+    dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
 
     head = "<tr><th>일자</th><th>요일</th><th>날짜<br>칸</th>" + \
         "".join(f"<th>{rt}<br><span style='font-weight:400;font-size:9px'>x{NEW_MULT[rt]:.3f}</span></th>"
@@ -1088,6 +1136,7 @@ def _new_tab_types(day_df, type_df):
         dbg, dfg = new_color(int(info['rung']))
         cells = []
         gi = g.set_index('rt')
+        gi = gi[~gi.index.duplicated(keep='first')]   # 중복 셀 방어 (.loc 이 Series를 돌려주도록)
         for rt in order:
             if rt not in gi.index:
                 cells.append("<td class='mut'>—</td>")
@@ -1307,33 +1356,56 @@ def _new_tab_promo(type_df, promotions, channel_list):
         st.markdown("##### 이지에디터 채널 상품 — 신 요금 기준 재계산")
         st.caption("사이드바 이지에디터에 등록된 상품(할인% · 추가금)을 그대로 신 사다리에 얹었습니다. "
                    "설정 자체는 현행 엔진과 공유합니다.")
-        for cname in channel_list:
-            items = (promotions or {}).get(cname, {}).get("items", [])
-            if not items:
+        promos = promotions if isinstance(promotions, dict) else {}
+        for cname in (channel_list or []):
+            # ※ settings/channels 구조가 예상과 다를 수 있어 단계마다 형태를 확인합니다.
+            conf = promos.get(cname)
+            items = conf.get("items") if isinstance(conf, dict) else None
+            if not isinstance(items, (list, tuple)) or not items:
                 continue
             with st.expander(f"📦 {cname} ({len(items)}개 상품)", expanded=False):
-                recs = []
+                recs, skipped = [], []
                 for it in items:
-                    irt = it.get('객실타입')
-                    if irt not in NEW_TABLE:
+                    if not isinstance(it, dict):
+                        skipped.append("형식 오류 (행이 비어 있음)")
                         continue
-                    disc = float(it.get('할인(%)') or 0) / 100.0
-                    add = float(it.get('추가금') or 0)
+                    irt = it.get('객실타입')
+                    irt = str(irt).strip().upper() if irt is not None else ""
+                    pname = _txt(it.get('상품명'), "(이름 없음)")
+                    if irt not in NEW_TABLE:
+                        skipped.append(f"{pname}: 객실타입 '{it.get('객실타입')}' 을 못 알아봄")
+                        continue
+                    # ※ 이지에디터의 빈 칸은 NaN 으로 저장됩니다. 파이썬에서 NaN 은
+                    #   참(truthy)이라 `float(x) or 0` 이 NaN 을 그대로 통과시켜
+                    #   int(round(NaN)) 에서 ValueError 가 납니다. _numf 로 받습니다.
+                    disc = _numf(it.get('할인(%)'), 0.0) / 100.0
+                    add = _numf(it.get('추가금'), 0.0)
+                    if not (0.0 <= disc <= 1.0):
+                        skipped.append(f"{pname}: 할인율 {it.get('할인(%)')!r} 이 0~100 범위 밖")
+                        continue
                     sub = type_df[(type_df['rt'] == irt) & (type_df['dta'] >= 0)]
                     for r in sub.itertuples():
-                        price = int(round((new_raw(irt, r.rung) * (1 - disc) + add) / 1000) * 1000)
-                        net_k = (price / new_raw(irt, r.rung)) if new_raw(irt, r.rung) else 0
+                        base = new_raw(irt, r.rung)
+                        if not base:
+                            continue
+                        price = int(round((base * (1 - disc) + add) / 1000) * 1000)
+                        net_k = price / base
                         recs.append({
                             "일자": r.date.strftime('%m/%d'), "요일": r.dow,
-                            "객실": irt, "상품": it.get('상품명'), "칸": r.lab,
+                            "객실": irt, "상품": pname, "칸": r.lab,
                             "로드(BAR)": r.load, "판매가": price,
                             "계수": round(net_k, 4),
                             "하한": "OK" if net_k >= NEW_FLOOR_NRF else "⚠️ 하한 미달",
                             "판매": r.state,
                         })
+                if skipped:
+                    st.warning("건너뛴 상품 %d건 — 이지에디터에서 값을 확인하세요.\n\n- %s"
+                               % (len(skipped), "\n- ".join(skipped[:12])))
                 if recs:
                     st.dataframe(pd.DataFrame(recs), use_container_width=True,
                                  hide_index=True, height=360)
+                elif not skipped:
+                    st.info("표시할 날짜가 없습니다 (전부 과거 날짜).")
 
 
 # =============================================================================
@@ -1350,6 +1422,7 @@ def _new_tab_override(day_df, type_df, db, today):
         st.info("리포트를 업로드하세요.")
         return
 
+    _dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
     raw = new_load_overrides(db)
     dates = sorted(day_df[day_df['dta'] >= 0]['date'].unique())
     if not dates:
@@ -1358,13 +1431,13 @@ def _new_tab_override(day_df, type_df, db, today):
     tgt = st.selectbox("예외를 걸 날짜", dates,
                        format_func=lambda x: (
                            f"{x.strftime('%Y-%m-%d')} ({WD_KR[x.weekday()]}) "
-                           f"— 현재 {day_df.set_index('date').loc[x, 'lab']}"),
+                           f"— 현재 {_dmap.loc[x, 'lab']}"),
                        key="new_ov_date")
     ds = tgt.strftime('%Y-%m-%d')
     cur = (raw.get(ds) or {}).get('rooms', {})
     memo_cur = (raw.get(ds) or {}).get('memo', "")
 
-    info = day_df.set_index('date').loc[tgt]
+    info = _dmap.loc[tgt]
     st.markdown(
         f"**계산 결과** — 앵커 {info['anchor_lab']} → 소계 {info['pre_lab']} → 확정 **{info['lab']}**"
         + (f" · floor {info['floor']} ({info['floor_by']})" if info['floor_by'] else "")
@@ -1377,8 +1450,10 @@ def _new_tab_override(day_df, type_df, db, today):
                             key="new_ov_day")
 
     st.markdown("###### 객실타입별 고정")
-    tsub = (type_df[type_df['date'] == tgt].set_index('rt')
-            if type_df is not None and not type_df.empty else None)
+    tsub = None
+    if type_df is not None and not type_df.empty:
+        tsub = type_df[type_df['date'] == tgt].set_index('rt')
+        tsub = tsub[~tsub.index.duplicated(keep='first')]
     picks = {}
     cols = st.columns(5)
     for i, rt in enumerate(NEW_ROOMS):
