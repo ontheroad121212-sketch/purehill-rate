@@ -143,8 +143,12 @@ def parse_reports(files, base_day):
 
 
 def load_latest_snapshot():
+    """DB에 저장된 가장 최근 스냅샷. 반환: (data_df, prev_df, work_date)
+
+    기존 앱의 get_latest_snapshot() 과 같은 것을 읽습니다 (daily_snapshots 공유).
+    """
     if db is None:
-        return pd.DataFrame(), None
+        return pd.DataFrame(), pd.DataFrame(), None
     try:
         docs = (db.collection(COL_SNAPSHOTS)
                   .order_by("save_time", direction=firestore.Query.DESCENDING)
@@ -157,10 +161,47 @@ def load_latest_snapshot():
             prev = pd.DataFrame(d.get('prev_data', []) or [])
             if not prev.empty and 'Date' in prev.columns:
                 prev['Date'] = pd.to_datetime(prev['Date']).dt.date
-            return (df, prev), d.get('work_date', '알수없음')
+            return df, prev, d.get('work_date', '알수없음')
     except Exception as e:
         st.error(f"최신 스냅샷 불러오기 실패: {e}")
-    return (pd.DataFrame(), pd.DataFrame()), None
+    return pd.DataFrame(), pd.DataFrame(), None
+
+
+def save_today_snapshot():
+    """오늘 내역을 스냅샷으로 저장 — 다음 업로드의 '이전 기록'이 됩니다.
+
+    기존 앱의 '🚀 오늘 내역 저장'과 같은 컬렉션·같은 형태로 씁니다.
+    단, 기존 앱이 저장 시 함께 돌리는 '예외 자동 갱신'(applied_rates 를 손대는
+    auto_update_stale_exceptions)은 여기서 실행하지 않습니다. 이 페이지는
+    기존 로직의 요금 데이터를 건드리지 않습니다.
+    """
+    if db is None:
+        return False, "DB 미연결 — 저장할 수 없습니다."
+    t = st.session_state.today_df
+    if t is None or t.empty:
+        return False, "저장할 데이터가 없습니다."
+    try:
+        td = t.copy()
+        td['Date'] = td['Date'].apply(lambda x: x.isoformat())
+        pd_list = []
+        p = st.session_state.prev_df
+        if p is not None and not p.empty and 'Date' in p.columns:
+            pf = p.copy()
+            pf['Date'] = pf['Date'].apply(lambda x: x.isoformat())
+            pd_list = pf.to_dict(orient='records')
+        db.collection(COL_SNAPSHOTS).add({
+            "work_date": date.today().strftime("%Y-%m-%d"),
+            "save_time": datetime.now().isoformat(),
+            "data": td.to_dict(orient='records'),
+            "prev_data": pd_list,
+            "saved_promotions": st.session_state.get('promotions', {}),
+            "saved_channel_list": st.session_state.get('channel_list', []),
+            "saved_manual_bars": st.session_state.get('manual_bars', {}),
+            "saved_by": "new_rate_logic_page",
+        })
+        return True, f"{date.today().strftime('%Y-%m-%d')} 스냅샷 저장 완료 ({len(td):,}행)"
+    except Exception as e:
+        return False, str(e)
 
 
 def load_snapshot_by_date(work_date_str):
@@ -247,39 +288,75 @@ with st.sidebar:
     else:
         st.info("데이터가 없습니다. 아래에서 올리거나 불러오세요.")
 
-    files = st.file_uploader("리포트 업로드", accept_multiple_files=True,
+    # ── 업로드: 버튼 없이 자동 반영 + 자동 DB 병합/비교 ──────────────
+    #   기존 앱 7번 '파일 로직 (스마트 병합)'과 같은 규칙입니다.
+    #     이전 기록이 없으면 → DB 최신 스냅샷을 이전 기록으로 잡고 부족한 날짜를 채움
+    #     이전 기록이 있으면 → 새 파일을 현재 데이터에 덮어쓰기(부분 수정), 이전 기록 유지
+    files = st.file_uploader("리포트 업로드 (부분 수정 가능)", accept_multiple_files=True,
                              key="new_uploader")
-    if files and st.button("📥 업로드 반영", use_container_width=True,
-                           key="new_apply_upload"):
-        new_df, failed = parse_reports(files, base_day)
-        if new_df.empty:
-            st.error("읽어낸 행이 없습니다. 파일 형식을 확인하세요.")
-        else:
-            old = st.session_state.today_df
-            if old is not None and not old.empty:
-                st.session_state.prev_df = old.copy()
-                merged = (pd.concat([new_df, old])
-                            .drop_duplicates(subset=['Date', 'RoomID'], keep='first'))
-                st.session_state.today_df = merged.sort_values(['Date', 'RoomID'])
-                st.session_state.new_engine_label = "직전 화면 데이터를 이전 기록으로 사용"
+    if files:
+        sig = tuple(sorted((f.name, getattr(f, 'size', 0)) for f in files))
+        if st.session_state.get('_new_upload_sig') != sig:
+            new_df, failed = parse_reports(files, base_day)
+            if new_df.empty:
+                st.error("읽어낸 행이 없습니다. 파일 형식을 확인하세요.")
+                st.session_state['_new_upload_sig'] = sig
             else:
-                st.session_state.today_df = new_df.sort_values(['Date', 'RoomID'])
-                st.session_state.new_engine_label = "신규 업로드 (이전 기록 없음)"
-            if failed:
-                st.warning(f"날짜로 인식하지 못한 헤더 {len(failed)}건: "
-                           + ", ".join(failed[:8]))
-            st.rerun()
+                cur_prev = st.session_state.prev_df
+                if cur_prev is None or cur_prev.empty:
+                    latest, _lp, wd = load_latest_snapshot()
+                    if latest is not None and not latest.empty:
+                        merged = (pd.concat([new_df, latest])
+                                    .drop_duplicates(subset=['Date', 'RoomID'],
+                                                     keep='first'))
+                        st.session_state.today_df = merged.sort_values(['Date', 'RoomID'])
+                        st.session_state.prev_df = latest
+                        st.session_state.new_engine_label = f"자동 DB 병합/비교: {wd} 기준"
+                    else:
+                        st.session_state.today_df = new_df.sort_values(['Date', 'RoomID'])
+                        st.session_state.prev_df = pd.DataFrame()
+                        st.session_state.new_engine_label = "비교 대상 없음 (신규 · 저장된 스냅샷이 없음)"
+                else:
+                    old = st.session_state.today_df
+                    src = old if (old is not None and not old.empty) else new_df
+                    merged = (pd.concat([new_df, src])
+                                .drop_duplicates(subset=['Date', 'RoomID'], keep='first'))
+                    st.session_state.today_df = merged.sort_values(['Date', 'RoomID'])
+                    # 이전 기록은 그대로 유지 (비교 기준이 흔들리지 않게)
+                if failed:
+                    st.warning(f"날짜로 인식하지 못한 헤더 {len(failed)}건: "
+                               + ", ".join(failed[:8]))
+                st.session_state['_new_upload_sig'] = sig
+                st.rerun()
 
-    if st.button("🗄️ DB 최신 스냅샷 불러오기", use_container_width=True,
-                 key="new_load_latest"):
-        (df, prev), wd = load_latest_snapshot()
-        if df is None or df.empty:
-            st.warning("저장된 스냅샷이 없습니다.")
-        else:
-            st.session_state.today_df = df
-            st.session_state.prev_df = prev if prev is not None else pd.DataFrame()
-            st.session_state.new_engine_label = f"DB 스냅샷: {wd} 기준"
-            st.rerun()
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        if st.button("🔄 최신 스냅샷을\n이전 기록으로", use_container_width=True,
+                     key="new_bind_prev",
+                     help="현재 화면 데이터는 그대로 두고, DB 최신 스냅샷만 "
+                          "'이전 기록'으로 붙여 비교를 다시 겁니다."):
+            latest, _lp, wd = load_latest_snapshot()
+            if latest is None or latest.empty:
+                st.warning("저장된 스냅샷이 없습니다.")
+            else:
+                st.session_state.prev_df = latest
+                st.session_state.new_engine_label = f"이전 기록 = DB 스냅샷 {wd}"
+                if wd == date.today().strftime('%Y-%m-%d'):
+                    st.session_state.new_engine_label += " ⚠️ 오늘 저장분"
+                st.rerun()
+    with cc2:
+        if st.button("🗄️ 최신 스냅샷\n불러오기", use_container_width=True,
+                     key="new_load_latest",
+                     help="현재 데이터를 DB 최신 스냅샷으로 교체합니다."):
+            df, prev, wd = load_latest_snapshot()
+            if df is None or df.empty:
+                st.warning("저장된 스냅샷이 없습니다.")
+            else:
+                st.session_state.today_df = df
+                st.session_state.prev_df = prev if prev is not None else pd.DataFrame()
+                st.session_state.new_engine_label = f"DB 스냅샷: {wd} 기준"
+                st.session_state.pop('_new_upload_sig', None)
+                st.rerun()
 
     with st.expander("📅 특정 저장일 불러오기", expanded=False):
         wd = st.date_input("저장일", value=date.today(), key="new_hist_day")
@@ -295,16 +372,28 @@ with st.sidebar:
 
     prev = st.session_state.prev_df
     if prev is not None and not prev.empty:
-        st.caption(f"✅ 이전 기록 {len(prev):,}행 — 페이스 단계가 작동합니다")
+        st.caption(f"✅ 이전 기록 {len(prev):,}행 — 자동 비교와 페이스 단계가 작동합니다")
     else:
-        st.caption("⚠️ 이전 기록 없음 — 페이스 단계는 0으로 계산됩니다 "
-                   "(앵커·연휴·재고·floor는 정상)")
+        st.caption("⚠️ 이전 기록 없음 — 자동 비교와 페이스 단계가 비어 있습니다 "
+                   "(앵커·연휴·재고·Floor는 정상)")
+
+    st.divider()
+    st.markdown("#### 💾 오늘 내역 저장")
+    st.caption("지금 화면의 재고를 스냅샷으로 남깁니다. **다음에 리포트를 올릴 때 "
+               "이게 '이전 기록'이 되어 자동 비교가 걸립니다.** "
+               "메인 페이지의 '🚀 오늘 내역 저장'과 같은 저장소를 쓰고, "
+               "기존 로직의 예외·요금 데이터는 건드리지 않습니다.")
+    if st.button("🚀 오늘 내역 저장", use_container_width=True, type="primary",
+                 key="new_save_snap"):
+        ok, msg = save_today_snapshot()
+        (st.success if ok else st.error)(msg)
 
     if st.button("🧹 이 페이지 데이터 비우기", use_container_width=True,
                  key="new_clear"):
         st.session_state.today_df = pd.DataFrame()
         st.session_state.prev_df = pd.DataFrame()
         st.session_state.new_engine_label = ""
+        st.session_state.pop('_new_upload_sig', None)
         st.rerun()
 
     st.divider()
@@ -321,4 +410,5 @@ eng.render_page(
     promotions=st.session_state.get('promotions', {}),
     channel_list=st.session_state.get('channel_list', []),
     today=base_day,
+    compare_label=st.session_state.get('new_engine_label', ""),
 )
