@@ -181,13 +181,18 @@ def save_today_snapshot():
     if t is None or t.empty:
         return False, "저장할 데이터가 없습니다."
     try:
+        # ※ Date 가 date · Timestamp · 문자열 중 무엇이든 'YYYY-MM-DD' 로 통일해
+        #   저장합니다. 섞이면 다음에 불러올 때 (Date, RoomID) 키가 안 맞아
+        #   비교가 조용히 비어버립니다.
         td = t.copy()
-        td['Date'] = td['Date'].apply(lambda x: x.isoformat())
+        td['Date'] = pd.to_datetime(td['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        td = td[td['Date'].notna()]
         pd_list = []
         p = st.session_state.prev_df
         if p is not None and not p.empty and 'Date' in p.columns:
             pf = p.copy()
-            pf['Date'] = pf['Date'].apply(lambda x: x.isoformat())
+            pf['Date'] = pd.to_datetime(pf['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+            pf = pf[pf['Date'].notna()]
             pd_list = pf.to_dict(orient='records')
         db.collection(COL_SNAPSHOTS).add({
             "work_date": date.today().strftime("%Y-%m-%d"),
