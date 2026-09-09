@@ -524,6 +524,59 @@ def _num(v):
         return None
 
 
+def _as_date(v):
+    """Timestamp · datetime · date · 'YYYY-MM-DD' 를 모두 datetime.date 로.
+
+    ※ 이게 없으면 조용한 사고가 납니다. 한쪽 프레임의 Date 가 pd.Timestamp,
+      다른 쪽이 datetime.date 이면 (Date, RoomID) 키가 절대 안 맞아서
+      픽업이 전부 비고, 페이스가 통째로 사라집니다.
+    """
+    if v is None:
+        return None
+    if isinstance(v, pd.Timestamp):
+        return v.date()
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    try:
+        t = pd.to_datetime(v, errors='coerce')
+    except (TypeError, ValueError):
+        return None
+    if t is None or t is pd.NaT or t != t:
+        return None
+    try:
+        return t.date()
+    except AttributeError:
+        return None
+
+
+def new_normalize(df):
+    """업로드/스냅샷 프레임의 키 타입을 통일하고 중복행을 제거합니다.
+
+    Date → datetime.date, RoomID → 대문자 문자열. 두 프레임을 비교하기 전에
+    반드시 통과시켜야 키가 맞습니다.
+    """
+    if df is None or not hasattr(df, 'empty') or df.empty:
+        return df
+    if not {'Date', 'RoomID'} <= set(df.columns):
+        return df
+    out = df.copy()
+    out['Date'] = out['Date'].map(_as_date)
+    out['RoomID'] = out['RoomID'].map(
+        lambda v: str(v).strip().upper() if v is not None else "")
+    out = out[out['Date'].notna() & (out['RoomID'] != "")]
+    if out.empty:
+        return out
+    return out.drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+
+
+def _numcol(s_, mul=1.0):
+    """어떤 dtype 이든 숫자 Series 로. None 만 든 object 컬럼에 .round() 를
+    걸면 TypeError 가 나므로, 표를 만들기 전에 반드시 통과시킵니다."""
+    return pd.to_numeric(s_, errors='coerce') * mul
+
+
 def new_hotel_inventory(curr_df):
     """{date: dict(tot_avail, tot_rooms, remh, occ)}  — 정상 행만 집계.
 
@@ -591,10 +644,9 @@ def new_compute_days(curr_df, prev_df=None, today=None, overrides=None):
         today = date.today()
     overrides = overrides or {}
 
-    # ※ (날짜, 객실) 중복행 방어 — 겹쳐 올린 업로드가 호텔 재고를 두 배로 세지 않게.
-    if curr_df is not None and not curr_df.empty \
-            and {'Date', 'RoomID'} <= set(curr_df.columns):
-        curr_df = curr_df.drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+    # ※ 키 타입 통일 + 중복행 제거. 이 두 줄이 픽업이 조용히 비는 사고를 막습니다.
+    curr_df = new_normalize(curr_df)
+    prev_df = new_normalize(prev_df)
 
     inv = new_hotel_inventory(curr_df)
     pk = new_pickup_map(curr_df, prev_df)
@@ -713,10 +765,10 @@ def new_compute_types(curr_df, day_df, today=None, overrides=None):
         return pd.DataFrame()
 
     base = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
-    # ※ (날짜, 객실) 중복행 방어. 업로드를 겹쳐 올리면 같은 셀이 두 번 들어오는데,
-    #   그대로 두면 아래 표 렌더에서 .loc 이 Series 대신 DataFrame 을 돌려줘
-    #   "The truth value of a Series is ambiguous" 로 화면이 죽습니다.
-    src = curr_df.drop_duplicates(subset=['Date', 'RoomID'], keep='first')
+    # ※ 키 타입 통일 + 중복행 제거 (렌더에서 .loc 이 Series 를 돌려주도록)
+    src = new_normalize(curr_df)
+    if src is None or src.empty:
+        return pd.DataFrame()
     rows = []
     for _, r in src.iterrows():
         d = r['Date']
@@ -1083,6 +1135,9 @@ def new_compute_change(curr_df, prev_df, day_df, type_df, today=None):
         return empty
     if today is None:
         today = date.today()
+    prev_df = new_normalize(prev_df)
+    if prev_df is None or prev_df.empty:
+        return empty
 
     try:
         prev_day = new_compute_days(prev_df, None, today=today)
@@ -1229,9 +1284,10 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
             "연휴": dv['hol'].replace("", "—"),
             "이전 잔여": dv['p_avail'], "현재 잔여": dv['tot_avail'],
             "판매(실)": dv['sold'],
-            "이전 총점유(%)": dv['p_occ'].round(1), "현재 총점유(%)": dv['occ'].round(1),
-            "점유 변화(%p)": dv['occ_move'].round(1),
-            "소진 배수": dv['pace_ratio'].round(2),
+            "이전 총점유(%)": _numcol(dv['p_occ']).round(1),
+            "현재 총점유(%)": _numcol(dv['occ']).round(1),
+            "점유 변화(%p)": _numcol(dv['occ_move']).round(1),
+            "소진 배수": _numcol(dv['pace_ratio']).round(2),
             "페이스": dv['pace_adj'], "재고": dv['inv_adj'],
             "이전 칸": dv['p_lab'], "현재 칸": dv['lab'], "이동": dv['rung_move'],
         })
@@ -1260,7 +1316,7 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label=""):
                 "객실": tv['rt'].astype(str),
                 "전체": tv['cap'], "이전 잔여": tv['p_avail'], "현재 잔여": tv['avail'],
                 "판매(실)": tv['sold'],
-                "잔여율(%)": (tv['remt'] * 100).round(1),
+                "잔여율(%)": _numcol(tv['remt'], 100).round(1),
                 "이전 칸": tv['p_lab'], "현재 칸": tv['lab'], "이동": tv['rung_move'],
                 "이전 회원가": tv['p_member'], "현재 회원가": tv['member'],
                 "요금 차이": tv['price_move'],
@@ -1404,7 +1460,7 @@ def _new_tab_types(day_df, type_df):
         sheet = one[['rt', 'cap', 'avail', 'remt', 'lab', 'tadj', 'load', 'member',
                      'rack', 'floor_flex', 'floor_nrf', 'state', 'approval', 'why']].copy()
         sheet.insert(1, '객실명', sheet['rt'].map(NEW_ROOM_NAMES))
-        sheet['remt'] = (sheet['remt'] * 100).round(1)
+        sheet['remt'] = _numcol(sheet['remt'], 100).round(1)
         sheet.columns = ['객실', '객실명', '전체', '잔여', '잔여율(%)', '칸', '타입조정',
                          '로드(BAR)', '회원 노출가', '해외 랙', 'Flex 하한', 'NRF 하한',
                          '상태', '승인', '근거']
@@ -1476,8 +1532,8 @@ def _new_tab_floor(day_df):
             lambda x: (x - timedelta(days=NEW_REVIEW_LEAD)).strftime('%Y-%m-%d'))
         t['date'] = t['date'].map(lambda x: x.strftime('%Y-%m-%d'))
         t['dta'] = t['dta'].map(lambda x: f"D-{x}")
-        t['occ'] = t['occ'].round(1)
-        t['remh'] = (t['remh'] * 100).round(1)
+        t['occ'] = _numcol(t['occ']).round(1)
+        t['remh'] = _numcol(t['remh'], 100).round(1)
         t = t[['review', 'date', 'dow', 'dta', 'occ', 'remh', 'anchor_lab', 'lab']]
         t.columns = ['재검증일', '입실일', '요일', '리드타임', '총점유(%)', '총잔여(%)',
                      '앵커', '현재 칸']
@@ -1870,6 +1926,21 @@ def _new_tab_download(day_df, type_df, day_cmp=None, type_cmp=None):
 # =============================================================================
 # 20. 진입점
 # =============================================================================
+def _safe(fn, *a, **k):
+    """탭 하나가 터져도 페이지 전체가 죽지 않게 하고, 실제 오류를 화면에 보여줍니다.
+
+    ※ Streamlit Cloud 는 잡히지 않은 예외의 메시지를 가려버려서 원인을 알 수 없습니다.
+      여기서 잡아 st.exception 으로 띄우면 트레이스백이 그대로 보입니다.
+    """
+    try:
+        fn(*a, **k)
+    except Exception as e:                     # noqa: BLE001 — 진단이 목적
+        st.error(f"이 탭을 그리는 중 오류가 났습니다: {type(e).__name__}: {e}")
+        st.caption("다른 탭은 정상입니다. 아래 트레이스백을 그대로 알려주시면 고칩니다.")
+        st.exception(e)
+
+
+
 def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=None,
                 today=None, compare_label=""):
     """pages/ 아래 페이지가 이 함수 하나만 부릅니다. app.py 와는 완전히 무관합니다."""
@@ -1893,9 +1964,9 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
                    "그대로 넘어옵니다.")
         tabs = st.tabs(["📐 규칙 & 목표", "🏷️ 할인 레이어"])
         with tabs[0]:
-            _new_tab_rules(None, None, today)
+            _safe(_new_tab_rules, None, None, today)
         with tabs[1]:
-            _new_tab_promo(None, promotions, channel_list)
+            _safe(_new_tab_promo, None, promotions, channel_list)
         return
 
     ov = new_override_map(new_load_overrides(db))
@@ -1959,18 +2030,18 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
         "✋ 예외 설정", "📥 다운로드",
     ])
     with tabs[0]:
-        _new_tab_rules(day_df, type_df, today)
+        _safe(_new_tab_rules, day_df, type_df, today)
     with tabs[1]:
-        _new_tab_change(day_cmp, type_cmp, chg, compare_label)
+        _safe(_new_tab_change, day_cmp, type_cmp, chg, compare_label)
     with tabs[2]:
-        _new_tab_days(day_df)
+        _safe(_new_tab_days, day_df)
     with tabs[3]:
-        _new_tab_types(day_df, type_df)
+        _safe(_new_tab_types, day_df, type_df)
     with tabs[4]:
-        _new_tab_floor(day_df)
+        _safe(_new_tab_floor, day_df)
     with tabs[5]:
-        _new_tab_promo(type_df, promotions, channel_list)
+        _safe(_new_tab_promo, type_df, promotions, channel_list)
     with tabs[6]:
-        _new_tab_override(day_df, type_df, db, today)
+        _safe(_new_tab_override, day_df, type_df, db, today)
     with tabs[7]:
-        _new_tab_download(day_df, type_df, day_cmp, type_cmp)
+        _safe(_new_tab_download, day_df, type_df, day_cmp, type_cmp)
