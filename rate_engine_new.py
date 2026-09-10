@@ -2010,6 +2010,303 @@ def _mx_controls(day_df, key, cell_modes=None, default_mode=0):
 
 
 # =============================================================================
+# 15-B. 탭 5 — 최종 요금 (원장)
+# -----------------------------------------------------------------------------
+#  왜 이 탭이 따로 있는가 — 다른 탭과 목적이 다릅니다.
+#
+#    다른 탭 (일자별 · 타입별 · 변화)  = "무엇을 바꿔야 하나"  → 판단용
+#      · 미래 날짜만, 한 달씩, 조정 근거를 강조
+#      · 마감 셀은 눌러서 죽임 (지금 팔 수 없는 재고니까)
+#
+#    이 탭                            = "지금 무엇이 확정돼 있나" → 조회용 원장
+#      · 전 기간 · 과거 포함 · 마감 포함이 기본
+#      · 마감·오버부킹도 요금을 끝까지 표시합니다. 이유:
+#          ① 마감된 날도 채널에 로드된 요금은 실재합니다 (대조 필요)
+#          ② 취소가 나면 그 요금으로 다시 열립니다
+#          ③ 사후 검증 — "그날 얼마로 닫았나"를 봐야 합니다
+#      · 셀 하나를 고르면 앵커부터 최종까지 계산 이력을 한 장으로 봅니다
+#      · 플랫 원장(날짜 x 타입 한 행씩)으로 검색·정렬·엑셀
+# =============================================================================
+_FIN_FIELDS = [("로드(BAR)", 'load'), ("회원 노출가", 'member'), ("해외 랙", 'rack'),
+               ("Flexible 하한", 'floor_flex'), ("NRF 하한", 'floor_nrf')]
+
+
+def _new_tab_final(day_df, type_df, ov_raw=None):
+    if day_df is None or day_df.empty or type_df is None or type_df.empty:
+        st.info("리포트를 업로드하세요.")
+        return
+    st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
+    st.markdown(
+        "<div class='renote'><b>지금 확정돼 있는 요금을 그대로 보여주는 원장입니다.</b> "
+        "다른 탭은 '무엇을 바꿔야 하나'를 보는 판단용이라 미래 날짜만 · 한 달씩 · 마감 셀은 "
+        "눌러서 보여주지만, 이 탭은 <b>전 기간 · 과거 포함 · 마감 포함</b>이 기본입니다.<br>"
+        "마감·오버부킹된 셀도 요금을 끝까지 표시합니다 — 마감된 날도 채널에 로드된 요금은 "
+        "실재하고, 취소가 나면 그 요금으로 다시 열리며, 사후에 \\u201c그날 얼마로 닫았나\\u201d를 "
+        "확인해야 하기 때문입니다.</div>", unsafe_allow_html=True)
+
+    all_d = sorted(day_df['date'].unique())
+    dsub = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
+    months = sorted({(d.year, d.month) for d in all_d})
+    mlabels = [f"{y}년 {m}월" for y, m in months]
+
+    c1, c2, c3 = st.columns([2, 3, 2])
+    with c1:
+        span = st.radio("기간", ["전 기간", "월별"], horizontal=True, key="fin_span")
+    with c2:
+        if span == "월별":
+            pick = st.multiselect("월", mlabels, default=mlabels, key="fin_mon")
+            keep = {tuple(int(x.rstrip('년월')) for x in p.split()) for p in pick}
+            dates = [d for d in all_d if (d.year, d.month) in keep]
+        else:
+            dates = list(all_d)
+            st.caption(f"{len(all_d)}일 전체 · {all_d[0]} ~ {all_d[-1]}")
+    with c3:
+        fld_nm = st.selectbox("표시 요금", [n for n, _ in _FIN_FIELDS], key="fin_fld")
+    field = dict(_FIN_FIELDS)[fld_nm]
+    with st.expander("🔧 객실타입 좁히기", expanded=False):
+        rooms = st.multiselect("객실타입", NEW_ROW_ORDER, default=NEW_ROW_ORDER,
+                               key="fin_rooms")
+    order = [r for r in NEW_ROW_ORDER if r in (rooms or NEW_ROW_ORDER)]
+    if not dates or not order:
+        st.warning("표시할 날짜 또는 객실이 없습니다.")
+        return
+
+    tix = type_df.drop_duplicates(subset=['date', 'rt'], keep='first')
+    tix = tix.set_index(['date', 'rt'])
+    view = type_df[type_df['date'].isin(dates)
+                   & type_df['rt'].astype(str).isin(order)].copy()
+
+    # ── ④ 기간 요약 ───────────────────────────────────────────────
+    open_cells = view[~view['stop']]
+    c = st.columns(6)
+    c[0].metric("조회 셀", f"{len(view):,}")
+    c[1].metric("판매 마감", f"{int(view['stop'].sum()):,}")
+    c[2].metric(f"{fld_nm} 중앙",
+                f"{int(open_cells[field].median()):,}원" if len(open_cells) else "—")
+    c[3].metric("칸 범위",
+                f"{new_lab(int(view['rung'].min()))} ~ {new_lab(int(view['rung'].max()))}")
+    c[4].metric("계단 상향", f"{int((view['ladder_up'] > 0).sum()):,}셀")
+    c[5].metric("수동 예외", f"{int(view['is_override'].sum()):,}셀")
+
+    # ── ① 원장 매트릭스 (마감 포함) ────────────────────────────────
+    st.markdown(_mx_title(f"① 확정 요금 원장 · {fld_nm} — 마감 셀도 그대로 표시", True),
+                unsafe_allow_html=True)
+    st.markdown(_legend("<b>점선 테두리</b> 판매 마감 · <b>⇧</b> 계단 상향"),
+                unsafe_allow_html=True)
+    head = _mx_head(dates, dsub, "객실")
+    rows, xrows = [], []
+
+    cs, xs = [], []
+    for i, d in enumerate(dates):
+        r = dsub.loc[d]
+        bg, fg = new_color(int(r['rung']))
+        cs.append(f"<td class='c3{_wkcls(dates, i)}' style='background:{bg};color:{fg};"
+                  f"font-weight:700'>{r['lab']}<em>D-{int(r['dta'])}</em></td>")
+        xs.append({'t': r['lab'], 's': f"D-{int(r['dta'])}", 'bg': bg, 'fg': fg})
+    rows.append("<tr class='gend'><td class='rh'>날짜 칸 (기준)<em>리드타임</em></td>"
+                + "".join(cs) + "</tr>")
+    xrows.append({'label': '날짜 칸 (기준)', 'sub': '리드타임', 'group_end': True,
+                  'cells': xs})
+
+    for rt in order:
+        gend = rt in NEW_GROUP_END
+        cs, xs = [], []
+        for i, d in enumerate(dates):
+            wk = _wkcls(dates, i)
+            key = (d, rt)
+            if key not in tix.index:
+                cs.append(f"<td class='mut{wk}'>—</td>")
+                xs.append({'t': "—", 'bold': False})
+                continue
+            row = tix.loc[key]
+            bg, fg = new_color(int(row['rung']))
+            mk = ""
+            if bool(row['is_override']):
+                mk += "✋"
+            elif row['approval']:
+                mk += "★"
+            if int(row.get('ladder_up', 0) or 0):
+                mk += "⇧"
+            closed = bool(row['stop'])
+            # ※ 마감이어도 요금을 지우지 않습니다. 점선 테두리 + 배지로만 구분.
+            extra = ("outline:2px dashed #6B7280;outline-offset:-2px;"
+                     if closed else "")
+            badge = (f"<i style='color:{fg};opacity:.9;font-weight:700'>"
+                     f"{row['state']} {_won(row['avail'])}실</i>" if closed else
+                     f"<i style='color:{fg};opacity:.75'>{_won(row['avail'])}실</i>")
+            cs.append(f"<td class='c3{wk}' style='background:{bg};color:{fg};"
+                      f"font-weight:700;{extra}'>{_won(row[field])}"
+                      f"<em>{row['lab']}{mk}</em>{badge}</td>")
+            xs.append({'t': _won(row[field]),
+                       's': f"{row['lab']}{mk}",
+                       's2': (f"{row['state']} {_won(row['avail'])}실" if closed
+                              else f"{_won(row['avail'])}실"),
+                       'bg': bg, 'fg': fg})
+        rows.append(f"<tr class='{'gend' if gend else ''}'><td class='rh'>{rt}"
+                    f"<em>{NEW_ROOM_NAMES.get(rt,'')}</em></td>"
+                    + "".join(cs) + "</tr>")
+        xrows.append({'label': rt, 'sub': NEW_ROOM_NAMES.get(rt, ''),
+                      'group_end': gend, 'cells': xs})
+
+    st.markdown("<div class='mxwrap'><table class='mx'>" + head + "<tbody>"
+                + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
+    st.caption("셀 = 요금 / 칸 / 잔여. **점선 테두리 + '마감·오버부킹' 배지**가 붙은 셀은 "
+               "지금 팔 수 없지만 요금은 그대로 로드돼 있는 상태입니다. "
+               "★ RM 승인 구간 · ✋ 수동 예외 · ⇧ 역전방지 계단.")
+    _dl(f"📥 이 원장 엑셀 (서식 유지) — {fld_nm}",
+        [{'sheet': '확정 요금 원장', 'title': f"확정 요금 원장 · {fld_nm} (마감 포함)",
+          'firstcol': '객실',
+          'head1': [d.strftime('%m-%d') for d in dates],
+          'head2': [WD_KR[d.weekday()] for d in dates],
+          'headc': ['#FBEADB' if str(dsub.loc[d, 'hol'] or "") else '#F3F5F7'
+                    for d in dates],
+          'rows': xrows, 'cw': 11,
+          'note': "마감·오버부킹 셀도 요금을 그대로 표시합니다 "
+                  "(채널 로드 대조 · 취소 시 재오픈 · 사후 검증)."}],
+        f"확정요금원장_{fld_nm}", "dl_final_mx")
+
+    # ── ② 셀 드릴다운 — 이 요금이 왜 이렇게 나왔나 ─────────────────
+    st.divider()
+    st.markdown("##### ② 이 요금은 왜 이렇게 나왔나 — 계산 이력")
+    st.caption("날짜와 객실을 고르면 앵커부터 최종 요금까지 단계별로 펼칩니다. "
+               "날짜 단계(3번 탭)와 타입 단계(4번 탭)가 한 화면에 이어집니다.")
+    q1, q2 = st.columns([3, 2])
+    with q1:
+        qd = st.selectbox(
+            "날짜", dates,
+            format_func=lambda x: (f"{x.strftime('%Y-%m-%d')} ({WD_KR[x.weekday()]}) "
+                                   f"· {dsub.loc[x, 'lab']}"
+                                   + (f" · {dsub.loc[x, 'hol']}"
+                                      if dsub.loc[x, 'hol'] else "")),
+            key="fin_qd")
+    with q2:
+        qr = st.selectbox("객실", order,
+                          format_func=lambda x: f"{x} {NEW_ROOM_NAMES.get(x,'')}",
+                          key="fin_qr")
+    if (qd, qr) in tix.index:
+        dr = dsub.loc[qd]
+        tr = tix.loc[(qd, qr)]
+        steps = []
+
+        def add(no, nm, val, note=""):
+            steps.append({"단계": no, "내용": nm, "결과": val, "근거": note})
+
+        add("1", "앵커 (월 x 요일)", dr['anchor_lab'],
+            f"{qd.month}월 {WD_KR[qd.weekday()]}요일 앵커")
+        add("2", "연휴 반영", new_lab(int(dr['after_hol'])),
+            f"{dr['hol']} → {NEW_HOLIDAY_STEP}칸 상향" if dr['hol'] else "연휴 아님")
+        pa = int(dr['pace_adj'])
+        add("3", "페이스 (이전 기록 대비)",
+            new_lab(int(dr['after_hol']) + pa),
+            ("소진 배수 %.2f → %s%d칸" % (dr['pace_ratio'], "▲" if pa < 0 else "▼", abs(pa))
+             if pa and dr['pace_ratio'] == dr['pace_ratio'] else
+             ("D-%d — 페이스 창 밖" % int(dr['dta']) if int(dr['dta']) > NEW_PACE_LEAD_UP_MAX
+              else "조정 없음")))
+        ia = int(dr['inv_adj'])
+        add("4", "호텔 재고", dr['pre_lab'],
+            (f"총잔여율 {_pct(_num(dr['remh']))} → ▲{-ia}칸" if ia else
+             f"총잔여율 {_pct(_num(dr['remh']))} — 조정 없음"))
+        add("5", "Peak Event Floor", dr['ev_floor'] or "—",
+            f"{dr['ev']} 최소 {dr['ev_floor']}" if dr['ev_floor'] else "해당 없음")
+        add("6", "Scarcity Floor", dr['sc_floor'] or "—",
+            f"총잔여율 기준 최소 {dr['sc_floor']}" if dr['sc_floor'] else "해당 없음")
+        add("=", "날짜 확정 칸", dr['lab'],
+            dr['floor_by'] or ("수동 예외" if dr['is_override'] else "floor 구속 없음"))
+        ta = int(tr['tadj'])
+        add("7", "객실타입 조정", new_lab(int(tr['day_rung']) + ta),
+            (f"잔여 {_won(tr['avail'])}/{tr['cap']}실 "
+             f"({_pct(_num(tr['remt']))}) → {'▲' if ta < 0 else '▼'}{abs(ta)}칸"
+             if ta else f"잔여 {_won(tr['avail'])}/{tr['cap']}실 — 조정 없음"))
+        lu = int(tr.get('ladder_up', 0) or 0)
+        add("8", "역전방지 계단", new_lab(int(tr['rung'])) if lu else "—",
+            f"하급 객실 서열 보장 → ▲{lu}칸" if lu else "발동 안 함")
+        if bool(tr['is_override']):
+            add("✋", "수동 예외", tr['lab'], "사람이 고정한 칸 (자동 계산을 덮음)")
+        st.dataframe(pd.DataFrame(steps), use_container_width=True, hide_index=True)
+
+        bg, fg = new_color(int(tr['rung']))
+        cards = [("확정 칸", tr['lab']), ("로드(BAR)", _won(tr['load'])),
+                 ("회원 노출가", _won(tr['member'])), ("해외 랙", _won(tr['rack'])),
+                 ("Flexible 하한", _won(tr['floor_flex'])),
+                 ("NRF 하한", _won(tr['floor_nrf']))]
+        st.markdown(
+            "<div style='display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 2px'>"
+            + "".join(
+                f"<div style='flex:1 1 120px;border:1px solid #D9DEE3;border-radius:6px;"
+                f"padding:9px 12px;background:"
+                f"{bg if i == 0 else '#fff'};color:{fg if i == 0 else '#16202B'}'>"
+                f"<div style='font-size:10.5px;opacity:.8'>{k}</div>"
+                f"<div style='font-size:19px;font-weight:800;letter-spacing:-.02em'>"
+                f"{v}</div></div>" for i, (k, v) in enumerate(cards))
+            + "</div>", unsafe_allow_html=True)
+        st.caption(f"{qd.strftime('%Y-%m-%d')} ({WD_KR[qd.weekday()]}) · "
+                   f"{qr} {NEW_ROOM_NAMES.get(qr,'')} · {tr['state']} · "
+                   f"잔여 {_won(tr['avail'])}/{tr['cap']}실"
+                   + (f" · {tr['approval']}" if tr['approval'] else "")
+                   + (f"  |  {tr['why']}" if tr['why'] else ""))
+
+    # ── ③ 플랫 원장 ───────────────────────────────────────────────
+    st.divider()
+    st.markdown("##### ③ 플랫 원장 — 날짜 x 객실 한 행씩")
+    st.caption("검색·정렬이 되는 표입니다. 채널에 로드한 값과 대조하거나 "
+               "특정 조건(예: 마감인데 요금이 낮은 셀)을 찾을 때 씁니다.")
+    f1, f2 = st.columns([2, 3])
+    with f1:
+        only = st.radio("행 필터", ["전체", "판매 중만", "마감·오버부킹만",
+                                 "계단·예외 걸린 셀만"], key="fin_only")
+    v = view
+    if only == "판매 중만":
+        v = v[~v['stop']]
+    elif only == "마감·오버부킹만":
+        v = v[v['stop']]
+    elif only == "계단·예외 걸린 셀만":
+        v = v[(v['ladder_up'] > 0) | v['is_override']]
+    with f2:
+        st.caption(f"{len(v):,}행")
+    v = v.copy()
+    v['_o'] = v['rt'].astype(str).map({r: i for i, r in enumerate(NEW_ROW_ORDER)})
+    v = v.sort_values(['date', '_o'])
+    dmapf = dsub
+    flat = pd.DataFrame({
+        "일자": v['date'].map(lambda x: x.strftime('%Y-%m-%d')),
+        "요일": v['dow'], "D-": v['dta'].map(lambda x: f"D-{x}"),
+        "연휴": v['date'].map(lambda x: str(dmapf.loc[x, 'hol'] or "—")),
+        "객실": v['rt'].astype(str),
+        "객실명": v['rt'].astype(str).map(NEW_ROOM_NAMES),
+        "전체": v['cap'], "잔여": v['avail'],
+        "잔여율(%)": _numcol(v['remt'], 100).round(1),
+        "날짜 칸": v['day_lab'], "타입 조정": v['tadj'], "계단": v['ladder_up'],
+        "확정 칸": v['lab'],
+        "로드(BAR)": v['load'], "회원 노출가": v['member'], "해외 랙": v['rack'],
+        "Flex 하한": v['floor_flex'], "NRF 하한": v['floor_nrf'],
+        "상태": v['state'], "승인": v['approval'].replace("", "—"),
+        "예외": v['is_override'].map({True: "✋", False: ""}),
+        "근거": v['why'].replace("", "—"),
+    })
+    st.dataframe(flat, use_container_width=True, hide_index=True, height=460)
+    b = io.BytesIO()
+    with pd.ExcelWriter(b, engine='openpyxl') as w:
+        flat.to_excel(w, index=False, sheet_name="확정 요금 원장")
+        for nm2, f2_ in _FIN_FIELDS:
+            p = view.pivot_table(index='rt', columns='date', values=f2_,
+                                 aggfunc='first')
+            p = p.reindex(index=[r for r in NEW_ROOMS if r in p.index])
+            p.columns = [f"{x.strftime('%m-%d')}({WD_KR[x.weekday()]})" for x in p.columns]
+            p.index.name = "객실"
+            p.to_excel(w, sheet_name=nm2[:31])
+        pl = view.pivot_table(index='rt', columns='date', values='lab',
+                              aggfunc='first')
+        pl = pl.reindex(index=[r for r in NEW_ROOMS if r in pl.index])
+        pl.columns = [f"{x.strftime('%m-%d')}({WD_KR[x.weekday()]})" for x in pl.columns]
+        pl.index.name = "객실"
+        pl.to_excel(w, sheet_name="칸")
+    st.download_button("📥 플랫 원장 + 요금 매트릭스 6종 엑셀", data=b.getvalue(),
+                       file_name=f"확정요금원장_{date.today().strftime('%Y%m%d')}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                       key="dl_final_flat")
+
+
+# =============================================================================
 # 11-C. 요금표 (앵커 → 칸 → 타입별 요금) — 데이터 없이도 항상 볼 수 있습니다
 # =============================================================================
 def _diff_tag(rt):
@@ -2453,11 +2750,15 @@ def _new_tab_types(day_df, type_df):
             row = tix.loc[key]
             bg, fg = new_color(int(row['rung']))
             if bool(row['stop']):
-                cs.append(f"<td class='off c3{wk}'>{row['state']}"
-                          f"<em>{row['lab']}</em><i>{_won(row['avail'])}실</i></td>")
-                xs.append({'t': row['state'], 's': row['lab'],
+                # ※ 마감이어도 요금을 지우지 않습니다. 채널에 로드된 값은 실재하고,
+                #   취소가 나면 그 요금으로 다시 열립니다. 사선 + 배지로만 구분.
+                cs.append(f"<td class='off c3{wk}'>{_won(row['member'])}"
+                          f"<em>{row['lab']} · {row['state']}</em>"
+                          f"<i>{_won(row['avail'])}실</i></td>")
+                xs.append({'t': _won(row['member']),
+                           's': f"{row['lab']} · {row['state']}",
                            's2': f"{_won(row['avail'])}실",
-                           'bg': '#EFF1F2', 'fg': '#A8AEB4', 'bold': False})
+                           'bg': '#EFF1F2', 'fg': '#7B8288', 'bold': False})
                 continue
             mark = "✋" if bool(row['is_override']) else ("★" if row['approval'] else "")
             if int(row.get('ladder_up', 0) or 0):
@@ -2486,7 +2787,8 @@ def _new_tab_types(day_df, type_df):
     st.markdown("<div class='mxwrap'><table class='mx'>" + head + "<tbody>"
                 + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
     st.caption("**색은 칸의 절대 위치입니다** — 비쌀수록 진한 빨강, 쌀수록 연한 초록. "
-               "사선 셀은 잔여 0 이하로, 요금 조정이 아니라 판매를 닫아야 합니다. "
+               "사선 셀은 잔여 0 이하 — 요금 조정이 아니라 판매를 닫아야 합니다 "
+        "(요금은 회원 노출가로 계속 표시됩니다). "
                "굵은 세로선은 주 구분입니다. **⇧ 는 역전방지 계단으로 칸이 올라간 셀**입니다 — "
                "하급 객실보다 싸지지 않게 강제한 것이고, 하급에 팔 재고가 거의 없으면 "
                "계단을 걸지 않습니다. 이전 대비 변화는 2번 탭에서 보십시오.")
@@ -3163,10 +3465,10 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
 
     n_ov = len(ov)
     if n_ov:
-        msg = f"✋ 예외 {n_ov}일이 적용된 상태입니다. (8번 탭에서 관리)"
+        msg = f"✋ 예외 {n_ov}일이 적용된 상태입니다. (9번 탭에서 관리)"
         if not review_df.empty:
             st.warning(f"{msg}  ·  ⚠️ 그중 **재검토 필요 {len(review_df)}건** — "
-                       f"예외를 걸었을 때의 자동 계산값이 바뀌었습니다.")
+                       f"예외를 걸었을 때의 자동 계산값이 바뀌었습니다. (9번 탭)")
         else:
             st.info(msg)
 
@@ -3175,7 +3477,7 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
         chg_label = f"📈 이전 대비 변화 ({chg['moved_days']})"
     tabs = st.tabs([
         "📐 규칙 & 요약", chg_label, "📅 일자별 칸", "🛏️ 타입별 칸 · 요금",
-        "📋 요금표", "🛡️ Floor & 재심사", "🏷️ 할인 레이어 · 채널가",
+        "📒 최종 요금", "📋 요금표", "🛡️ Floor & 재심사", "🏷️ 할인 레이어 · 채널가",
         "✋ 예외 설정", "📥 다운로드",
     ])
     with tabs[0]:
@@ -3187,12 +3489,14 @@ def render_page(curr_df, prev_df=None, db=None, promotions=None, channel_list=No
     with tabs[3]:
         _safe(_new_tab_types, day_df, type_df)
     with tabs[4]:
-        _safe(_new_tab_ratecard)
+        _safe(_new_tab_final, day_df, type_df, ov_raw)
     with tabs[5]:
-        _safe(_new_tab_floor, day_df)
+        _safe(_new_tab_ratecard)
     with tabs[6]:
-        _safe(_new_tab_promo, type_df, promotions, channel_list)
+        _safe(_new_tab_floor, day_df)
     with tabs[7]:
-        _safe(_new_tab_override, day_df, type_df, db, today, auto_now, review_df)
+        _safe(_new_tab_promo, type_df, promotions, channel_list)
     with tabs[8]:
+        _safe(_new_tab_override, day_df, type_df, db, today, auto_now, review_df)
+    with tabs[9]:
         _safe(_new_tab_download, day_df, type_df, day_cmp, type_cmp)
