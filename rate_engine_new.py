@@ -46,10 +46,19 @@ NEW_EDITION = "Final 6.6"
 # =============================================================================
 # 1. 사다리 · 앵커 · 객실배수  (마스터 [안 G · Final 6.6] 확정값)
 # =============================================================================
-# HDT 기준 16칸, 칸 간격 8%. 가중 BAR 418,899원 / 필요 이론 BAR 418,849원.
+# HDT(힐 엠버 트윈) 기준 16칸, 칸 간격 8%.
+#
+# ※ 2차 정렬 (배수 재정렬 · 사다리 x0.945451)
+#   힐 엠버 트윈 → 힐 파인 더블 간격을 4.4% → 8.0%(정확히 1칸)로 벌렸습니다.
+#   두 객실은 원래 같은 요금이었고 올해 3~4월부터 2~3만원 차이를 두기 시작했는데,
+#   배수차(4.4%)가 칸 간격(8%)보다 작아서 한 칸만 어긋나면 서열이 뒤집혔습니다.
+#   포레스트는 프리미엄 포지션으로 힐 파인 더블 대비 2칸(+18%) 위에 놓았습니다.
+#   전체 사다리를 x0.945451 재역산해 믹스가중 BAR 418,905원을 유지합니다
+#   (변경 전 418,899원 · 필요 이론 BAR 418,849원) — 100억 목표에 영향 없습니다.
+#   그린밸리 · 펫 · 풀빌라는 요금 수준이 그대로 유지되도록 배수를 역보정했습니다.
 NEW_RUNG = {
-    1: 724000, 2: 671000, 3: 621000, 4: 575000, 5: 532000, 6: 493000, 7: 456000, 8: 423000,
-    9: 391000, 10: 362000, 11: 336000, 12: 311000, 13: 288000, 14: 266000, 15: 247000, 16: 228000,
+    1: 685000, 2: 634000, 3: 587000, 4: 544000, 5: 503000, 6: 466000, 7: 431000, 8: 400000,
+    9: 370000, 10: 342000, 11: 318000, 12: 294000, 13: 272000, 14: 251000, 15: 234000, 16: 216000,
 }
 NEW_LAB = ['0pp', '0p', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']
 NEW_N = 16
@@ -79,41 +88,45 @@ def new_idx(label):
     return _NEW_RI_LOWER.get(s)
 
 
-# 객실타입 배수 (HDT = 1.0). 직전연도 실현 ADR 회귀로 산출.
+# 객실타입 배수 (HDT = 1.0).
+#   힐 엠버 트윈 → 힐 파인 더블 +8.0% (1칸)   ← 2~3만원 차이 유지
+#   힐 파인 더블 → 포레스트 가든 더블 +18.0% (2.25칸)  ← 포레스트 프리미엄
+#   포레스트 가든 더블 → EB +13.9% · EB → 플로라 +8.0% · 플로라 → 힐 루나 +9.0%
+#   인접 간격이 모두 1칸(8%) 이상이라 한 칸 어긋나도 서열이 뒤집히지 않습니다.
 NEW_MULT = {
+    "FDB": 1.274,
+    "FDE": 1.452,
+    "HDP": 1.08,
     "HDT": 1.0,
-    "HDP": 1.044,
-    "FDB": 1.177,
-    "FDE": 1.341,
-    "HDF": 1.56,
-    "GDB": 0.816,
-    "GDF": 1.342,
-    "FFD": 1.383,
-    "FPT": 1.898,
-    "PPV": 2.843,
+    "HDF": 1.709,
+    "GDB": 0.863,
+    "GDF": 1.419,
+    "FFD": 1.568,
+    "FPT": 2.008,
+    "PPV": 3.007,
 }
 # 표시 순서는 기존 앱 ALL_ROOMS 와 동일합니다 (메인 호텔동 → 특수객실).
 NEW_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF", "GDB", "GDF", "FFD", "FPT", "PPV"]
 NEW_ROOM_NAMES = {
-    "HDT": "힐사이드 디럭스 트윈", "HDP": "힐사이드 디럭스 패밀리",
-    "FDB": "포레스트 디럭스 더블", "FDE": "포레스트 디럭스 이그제큐티브",
-    "HDF": "힐사이드 디럭스 스위트", "GDB": "그린밸리 더블",
-    "GDF": "그린밸리 패밀리", "FFD": "포레스트 패밀리 더블",
-    "FPT": "펫 프렌들리", "PPV": "프라이빗 풀빌라",
+    "HDT": "힐 엠버 트윈", "HDP": "힐 파인 더블", "HDF": "힐 루나 패밀리",
+    "FDB": "포레스트 가든 더블", "FDE": "포레스트 가든 더블 EB",
+    "FFD": "포레스트 플로라 더블", "FPT": "포레스트 펫 더블",
+    "GDB": "그린밸리 디럭스 더블", "GDF": "그린밸리 디럭스 패밀리",
+    "PPV": "프라이빗 풀 빌라",
 }
 
 # 타입별 16칸 요금표 = round(RUNG x MULT, 천원). 로드(BAR) 기준가입니다.
 NEW_TABLE = {
-    "HDT": {"0pp": 724000, "0p": 671000, "0": 621000, "1": 575000, "2": 532000, "3": 493000, "4": 456000, "5": 423000, "6": 391000, "7": 362000, "8": 336000, "9": 311000, "10": 288000, "11": 266000, "12": 247000, "13": 228000},
-    "HDP": {"0pp": 756000, "0p": 701000, "0": 648000, "1": 600000, "2": 555000, "3": 515000, "4": 476000, "5": 442000, "6": 408000, "7": 378000, "8": 351000, "9": 325000, "10": 301000, "11": 278000, "12": 258000, "13": 238000},
-    "FDB": {"0pp": 852000, "0p": 790000, "0": 731000, "1": 677000, "2": 626000, "3": 580000, "4": 537000, "5": 498000, "6": 460000, "7": 426000, "8": 395000, "9": 366000, "10": 339000, "11": 313000, "12": 291000, "13": 268000},
-    "FDE": {"0pp": 971000, "0p": 900000, "0": 833000, "1": 771000, "2": 713000, "3": 661000, "4": 611000, "5": 567000, "6": 524000, "7": 485000, "8": 451000, "9": 417000, "10": 386000, "11": 357000, "12": 331000, "13": 306000},
-    "HDF": {"0pp": 1129000, "0p": 1047000, "0": 969000, "1": 897000, "2": 830000, "3": 769000, "4": 711000, "5": 660000, "6": 610000, "7": 565000, "8": 524000, "9": 485000, "10": 449000, "11": 415000, "12": 385000, "13": 356000},
-    "GDB": {"0pp": 591000, "0p": 548000, "0": 507000, "1": 469000, "2": 434000, "3": 402000, "4": 372000, "5": 345000, "6": 319000, "7": 295000, "8": 274000, "9": 254000, "10": 235000, "11": 217000, "12": 202000, "13": 186000},
-    "GDF": {"0pp": 972000, "0p": 900000, "0": 833000, "1": 772000, "2": 714000, "3": 662000, "4": 612000, "5": 568000, "6": 525000, "7": 486000, "8": 451000, "9": 417000, "10": 386000, "11": 357000, "12": 331000, "13": 306000},
-    "FFD": {"0pp": 1001000, "0p": 928000, "0": 859000, "1": 795000, "2": 736000, "3": 682000, "4": 631000, "5": 585000, "6": 541000, "7": 501000, "8": 465000, "9": 430000, "10": 398000, "11": 368000, "12": 342000, "13": 315000},
-    "FPT": {"0pp": 1374000, "0p": 1274000, "0": 1179000, "1": 1091000, "2": 1010000, "3": 936000, "4": 865000, "5": 803000, "6": 742000, "7": 687000, "8": 638000, "9": 590000, "10": 547000, "11": 505000, "12": 469000, "13": 433000},
-    "PPV": {"0pp": 2058000, "0p": 1908000, "0": 1766000, "1": 1635000, "2": 1512000, "3": 1402000, "4": 1296000, "5": 1203000, "6": 1112000, "7": 1029000, "8": 955000, "9": 884000, "10": 819000, "11": 756000, "12": 702000, "13": 648000},
+    "FDB": {"0pp": 873000, "0p": 808000, "0": 748000, "1": 693000, "2": 641000, "3": 594000, "4": 549000, "5": 510000, "6": 471000, "7": 436000, "8": 405000, "9": 375000, "10": 347000, "11": 320000, "12": 298000, "13": 275000},
+    "FDE": {"0pp": 995000, "0p": 921000, "0": 852000, "1": 790000, "2": 730000, "3": 677000, "4": 626000, "5": 581000, "6": 537000, "7": 497000, "8": 462000, "9": 427000, "10": 395000, "11": 364000, "12": 340000, "13": 314000},
+    "HDP": {"0pp": 740000, "0p": 685000, "0": 634000, "1": 588000, "2": 543000, "3": 503000, "4": 465000, "5": 432000, "6": 400000, "7": 369000, "8": 343000, "9": 318000, "10": 294000, "11": 271000, "12": 253000, "13": 233000},
+    "HDT": {"0pp": 685000, "0p": 634000, "0": 587000, "1": 544000, "2": 503000, "3": 466000, "4": 431000, "5": 400000, "6": 370000, "7": 342000, "8": 318000, "9": 294000, "10": 272000, "11": 251000, "12": 234000, "13": 216000},
+    "HDF": {"0pp": 1171000, "0p": 1084000, "0": 1003000, "1": 930000, "2": 860000, "3": 796000, "4": 737000, "5": 684000, "6": 632000, "7": 584000, "8": 543000, "9": 502000, "10": 465000, "11": 429000, "12": 400000, "13": 369000},
+    "GDB": {"0pp": 591000, "0p": 547000, "0": 507000, "1": 469000, "2": 434000, "3": 402000, "4": 372000, "5": 345000, "6": 319000, "7": 295000, "8": 274000, "9": 254000, "10": 235000, "11": 217000, "12": 202000, "13": 186000},
+    "GDF": {"0pp": 972000, "0p": 900000, "0": 833000, "1": 772000, "2": 714000, "3": 661000, "4": 612000, "5": 568000, "6": 525000, "7": 485000, "8": 451000, "9": 417000, "10": 386000, "11": 356000, "12": 332000, "13": 307000},
+    "FFD": {"0pp": 1074000, "0p": 994000, "0": 920000, "1": 853000, "2": 789000, "3": 731000, "4": 676000, "5": 627000, "6": 580000, "7": 536000, "8": 499000, "9": 461000, "10": 426000, "11": 394000, "12": 367000, "13": 339000},
+    "FPT": {"0pp": 1375000, "0p": 1273000, "0": 1179000, "1": 1092000, "2": 1010000, "3": 936000, "4": 865000, "5": 803000, "6": 743000, "7": 687000, "8": 639000, "9": 590000, "10": 546000, "11": 504000, "12": 470000, "13": 434000},
+    "PPV": {"0pp": 2060000, "0p": 1906000, "0": 1765000, "1": 1636000, "2": 1513000, "3": 1401000, "4": 1296000, "5": 1203000, "6": 1113000, "7": 1028000, "8": 956000, "9": 884000, "10": 818000, "11": 755000, "12": 704000, "13": 650000},
 }
 
 # 앵커 캘린더 84셀 — NEW_ANCHOR[월][요일(0=월 ... 6=일)] = 시작 칸 인덱스
@@ -238,7 +251,48 @@ NEW_TYPE_LOOSE_EXCLUDE = {"GDB"}               # 그린밸리 더블은 하향 �
 NEW_TYPE_SCARCE_REMH = 0.20                    # 그날 총잔여 20% 이하면 남은 타입은 희소재
 NEW_TYPE_RUNG_MIN = 1                          # 상향 한계
 NEW_TYPE_RUNG_MAX = 13                         # 하향 한계 (B10). B11~B13은 승인 항목
-NEW_APPROVAL_RUNG = 4                          # 칸 4(B1) 이상 고가는 헤드룸 = RM 승인
+NEW_APPROVAL_RUNG = 4
+
+# =============================================================================
+# 3-B. 역전방지 계단 (rate integrity) — 가격 서열을 지킵니다
+# -----------------------------------------------------------------------------
+# 왜 필요한가
+#   타입 조정이 등급별로 독립이라, 상급 객실이 하급보다 싸지는 일이 생깁니다.
+#   그러면 하급을 사려던 고객이 상급으로 올라가고 → 하급 재고가 안 팔리고
+#   상급을 제값보다 싸게 팝니다 (이중 손실 = 카니발라이제이션).
+#   배수 재정렬 전에는 113일 중 40일에서 이런 역전이 났습니다.
+#
+# 언제 거는가 — OCC 가 아니라 "하급에 잠식당할 재고가 실제로 남아 있는가"
+#   · 하급에 팔 재고 충분        → 최소 간격 전액
+#   · 하급 매진 임박             → 최소 간격 x NEW_LADDER_SHRINK
+#   · 하급 거의 소진             → 계단에서 제외 (잠식할 재고가 없으니 상급을
+#                                안 끌어올립니다 = "엠버 트윈만 소진됐는데
+#                                다른 타입까지 올라가는" 문제를 막습니다)
+#
+# 어떻게 올리는가
+#   가격을 임의값으로 밀어올리지 않고 '칸'을 올립니다. 그래서 모든 요금은
+#   항상 사다리 위에 있고, 화면·엑셀·채널 계산이 전부 일관됩니다.
+# =============================================================================
+# 메인 가격 계층 (낮은 등급 → 높은 등급) 과 인접 최소 간격(원)
+NEW_LADDER_CHAIN = ["HDT", "HDP", "FDB", "FDE", "FFD", "HDF"]
+NEW_LADDER_GAP = {
+    "HDP": 20000,   # 힐 엠버 트윈 → 힐 파인 더블   (같은 칸 자연 간격 27,000)
+    "FDB": 40000,   # 힐 파인 더블 → 포레스트 가든 더블 (자연 67,000)
+    "FDE": 40000,   # 포레스트 가든 더블 → EB          (자연 61,000)
+    "FFD": 25000,   # EB → 포레스트 플로라 더블        (자연 39,000)
+    "HDF": 30000,   # 포레스트 플로라 더블 → 힐 루나 패밀리 (자연 48,000)
+}
+# 그린밸리는 펜션형으로 상품군이 달라 별도 계층을 씁니다.
+NEW_LADDER_CHAIN_GV = ["GDB", "GDF"]
+NEW_LADDER_GAP_GV = {"GDF": 90000}
+# 하급이 이 상태면 계단에서 제외 (실수 또는 잔여율 중 하나만 걸려도)
+NEW_LADDER_DROP_N = 0
+NEW_LADDER_DROP_PCT = 0.08
+# 하급이 이 상태면 최소 간격을 축소
+NEW_LADDER_SHRINK_N = 3
+NEW_LADDER_SHRINK_PCT = 0.20
+NEW_LADDER_SHRINK = 0.35
+NEW_LADDER_ON = True                          # 칸 4(B1) 이상 고가는 헤드룸 = RM 승인
 
 # 재심사 (Opening Floor 완화 3조건)
 NEW_REVIEW_LEAD = 45           # 재검증일 = 입실일 - 45일
@@ -757,6 +811,55 @@ def new_compute_days(curr_df, prev_df=None, today=None, overrides=None):
 # =============================================================================
 # 9. 객실타입 칸 계산 (7단계)
 # =============================================================================
+def _ladder_factor(avail_low, cap_low):
+    """하급 객실 상태 → 최소 간격 배수. None 이면 계단에서 제외."""
+    a = _num(avail_low)
+    c = _num(cap_low)
+    sh = (a / c) if (a is not None and c and c > 0) else None
+    if a is None:
+        return 1.0
+    if a <= NEW_LADDER_DROP_N or (sh is not None and sh <= NEW_LADDER_DROP_PCT):
+        return None
+    if a <= NEW_LADDER_SHRINK_N or (sh is not None and sh <= NEW_LADDER_SHRINK_PCT):
+        return NEW_LADDER_SHRINK
+    return 1.0
+
+
+def new_apply_ladder(rows):
+    """한 날짜의 타입 결과에 가격 서열을 강제합니다 (칸을 올려서).
+
+    rows: {rt: dict(rung, avail, cap, ...)} — 제자리에서 수정하고
+          {rt: 올린 칸 수} 를 돌려줍니다.
+    """
+    moved = {}
+    if not NEW_LADDER_ON:
+        return moved
+    for chain, gaps in ((NEW_LADDER_CHAIN, NEW_LADDER_GAP),
+                        (NEW_LADDER_CHAIN_GV, NEW_LADDER_GAP_GV)):
+        last = None
+        for rt in chain:
+            r = rows.get(rt)
+            if r is None:
+                continue
+            if last is not None:
+                f = _ladder_factor(rows[last].get('avail'), rows[last].get('cap'))
+                if f is not None:
+                    gap = int(gaps.get(rt, 0) * f)
+                    need = new_load_price(last, rows[last]['rung']) + gap
+                    rung = int(r['rung'])
+                    up = 0
+                    while rung > NEW_TYPE_RUNG_MIN and new_load_price(rt, rung) < need:
+                        rung -= 1
+                        up += 1
+                    if up:
+                        r['rung'] = rung
+                        moved[rt] = up
+            av = _num(r.get('avail'))
+            if av is None or av > 0:
+                last = rt
+    return moved
+
+
 def new_compute_types(curr_df, day_df, today=None, overrides=None):
     """객실타입별 칸 배정. 반환: DataFrame."""
     if today is None:
@@ -820,18 +923,43 @@ def new_compute_types(curr_df, day_df, today=None, overrides=None):
             date=d, dow=WD_KR[d.weekday()], dta=dta, rt=rt,
             cap=int(cap) if cap else 0, avail=av, remt=remt,
             day_rung=dbase, day_lab=new_lab(dbase), tadj=tadj,
-            rung=rung, lab=new_lab(rung), state=state, why=why,
+            rung=rung, pre_ladder_rung=rung, lab=new_lab(rung),
+            state=state, why=why, is_override=is_ov,
+            stop=bool(av is not None and av <= 0),
+        ))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    # ── 역전방지 계단: 날짜별로 가격 서열을 강제합니다 ──────────────
+    lad = {}
+    if NEW_LADDER_ON:
+        by = {}
+        for i, r in enumerate(rows):
+            by.setdefault(r['date'], {})[r['rt']] = r
+        for d, grp in by.items():
+            fixed = {rt for rt, r in grp.items() if r['is_override']}
+            mv = new_apply_ladder({rt: r for rt, r in grp.items() if rt not in fixed})
+            for rt, up in mv.items():
+                lad[(d, rt)] = up
+
+    out = []
+    for r in rows:
+        rt, rung = r['rt'], int(r['rung'])
+        up = lad.get((r['date'], rt), 0)
+        why = r['why']
+        if up:
+            why = (why + " · " if why else "") + "역전방지 계단 %d칸" % up
+        out.append(dict(
+            r, rung=rung, lab=new_lab(rung), why=why, ladder_up=up,
             approval=("헤드룸 (RM 승인)" if rung <= NEW_APPROVAL_RUNG else ""),
             load=new_load_price(rt, rung), member=new_member_price(rt, rung),
             rack=new_k_price(rt, rung, NEW_RACK_MULT),
             floor_flex=new_k_price(rt, rung, NEW_FLOOR_FLEX),
             floor_nrf=new_k_price(rt, rung, NEW_FLOOR_NRF),
             floor_display=new_k_price(rt, rung, NEW_FLOOR_DISPLAY),
-            stop=bool(av is not None and av <= 0), is_override=is_ov,
         ))
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
+    df = pd.DataFrame(out)
     df['rt'] = pd.Categorical(df['rt'], categories=NEW_ROOMS, ordered=True)
     return df.sort_values(['date', 'rt']).reset_index(drop=True)
 
@@ -1099,6 +1227,9 @@ app.py 는 한 글자도 고치지 않았습니다. 두 로직은 사다리·요
    <b>Absolute Floor</b> — 자동 해제도, 승인 완화도 없습니다.</p></div>
  <div><h5>7 · 객실타입</h5><p>타입 잔여율 <code>&lt;=15 / 30%</code> 2 / 1칸 상향, 여유 타입은 하향.
    그날 총잔여 20% 이하면 남은 타입은 희소재로 1칸 더.</p></div>
+ <div><h5>8 · 역전방지 계단</h5><p>상급이 하급보다 싸지지 않게 <b>칸을 올려</b> 최소 간격을
+   강제합니다. 단 <b>하급이 거의 소진되면 계단에서 제외</b> — 엠버 트윈만 팔렸는데
+   다른 타입까지 올라가는 일을 막습니다.</p></div>
  <div><h5>7' · 판매 중지</h5><p>잔여 0 이하는 <b>요금이 아니라 판매를 닫습니다</b>.
    표시 요금은 참고값입니다.</p></div>
 </div>
@@ -1143,7 +1274,10 @@ app.py 는 한 글자도 고치지 않았습니다. 두 로직은 사다리·요
     c[2].metric("판매 마감 셀", f"{n_stop:,}")
     c[3].metric("floor 적용일", f"{n_floor}일", f"이벤트 {n_ev} · 희소 {n_sc}")
     c[4].metric("페이스 조정", f"↑{n_pace_up} / ↓{n_pace_dn}")
-    c[5].metric("타입이 날짜와 다른 셀", f"{diff_cells:,}")
+    n_lad = 0
+    if type_df is not None and not type_df.empty and 'ladder_up' in type_df.columns:
+        n_lad = int((type_df['ladder_up'] > 0).sum())
+    c[5].metric("역전방지 계단", f"{n_lad:,}셀", f"타입≠날짜 {diff_cells:,}셀")
 
     if n_pace_up == 0 and n_pace_dn == 0:
         st.markdown("""
@@ -1954,11 +2088,68 @@ def _new_tab_ratecard():
     st.caption(f"하향은 B10(칸 {NEW_TYPE_RUNG_MAX})에서 멈춥니다 — B11~B13은 자동 진입 "
                f"금지(승인 항목). 칸 B1 이상은 헤드룸으로 RM 승인 대상입니다.")
 
+    st.markdown(_mx_title("④ 역전방지 계단 — 가격 서열을 지킵니다"), unsafe_allow_html=True)
+    st.markdown(
+        "<div class='renote warn'>타입 조정이 등급별로 독립이라 <b>상급이 하급보다 싸지는</b> "
+        "일이 생깁니다. 그러면 하급을 사려던 고객이 상급으로 올라가 <b>하급 재고가 죽고 "
+        "상급을 제값보다 싸게 파는 이중 손실</b>이 납니다. 그래서 타입 조정을 마친 뒤 "
+        "최소 간격을 강제합니다 — 가격을 임의로 밀지 않고 <b>칸을 올려서</b> 맞추므로 "
+        "모든 요금은 항상 사다리 위에 있습니다.<br><br>"
+        "발동 기준은 OCC 가 아니라 <b>\u201c하급에 잠식당할 재고가 실제로 남아 있는가\u201d</b> "
+        "입니다. 하급이 거의 소진되면 계단에서 빼기 때문에, <b>엠버 트윈만 팔려나갔는데 "
+        "다른 타입까지 끌려 올라가는 일이 없습니다.</b></div>", unsafe_allow_html=True)
+    _CIR = "\u2460\u2461\u2462\u2463\u2464\u2465"
+    chain_rows = []
+    for i, rt in enumerate(NEW_LADDER_CHAIN):
+        if i == 0:
+            chain_rows.append({"계층": f"{_CIR[0]} {rt} {NEW_ROOM_NAMES[rt]}",
+                               "최소 간격": "기준 (가장 낮은 등급)",
+                               "같은 칸 자연 간격": "—", "배수 간격": "—"})
+            continue
+        lo = NEW_LADDER_CHAIN[i - 1]
+        nat = [new_load_price(rt, j) - new_load_price(lo, j) for j in range(1, NEW_N + 1)]
+        chain_rows.append({
+            "계층": f"{_CIR[i]} {rt} {NEW_ROOM_NAMES[rt]}",
+            "최소 간격": f"{NEW_LADDER_GAP[rt]:,}원",
+            "같은 칸 자연 간격": f"{min(nat):,} ~ {max(nat):,}원",
+            "배수 간격": f"{NEW_MULT[rt]/NEW_MULT[lo]-1:+.1%} "
+                       f"({(NEW_MULT[rt]/NEW_MULT[lo]-1)/0.08:.2f}칸)"})
+    chain_rows.append({"계층": "별도 · GDB → GDF (그린밸리)",
+                       "최소 간격": f"{NEW_LADDER_GAP_GV['GDF']:,}원",
+                       "같은 칸 자연 간격": "—",
+                       "배수 간격": f"{NEW_MULT['GDF']/NEW_MULT['GDB']-1:+.1%}"})
+    ladder_df = pd.DataFrame(chain_rows)
+    trig_df = pd.DataFrame([
+        {"하급 객실 상태": f"잔여 {NEW_LADDER_DROP_N}실 이하 또는 잔여율 "
+                      f"{NEW_LADDER_DROP_PCT*100:.0f}% 이하",
+         "계단": "제외 — 상급을 끌어올리지 않음",
+         "이유": "잠식당할 재고가 없으니 상급을 싸게 둬도 손실이 없습니다"},
+        {"하급 객실 상태": f"잔여 {NEW_LADDER_SHRINK_N}실 이하 또는 잔여율 "
+                      f"{NEW_LADDER_SHRINK_PCT*100:.0f}% 이하",
+         "계단": f"최소 간격 x {NEW_LADDER_SHRINK:.2f}",
+         "이유": "지킬 재고가 얼마 없어 간격을 좁힙니다"},
+        {"하급 객실 상태": "그 외 (팔 재고 충분)", "계단": "최소 간격 전액",
+         "이유": "상급을 싸게 두면 하급이 죽습니다"},
+        {"하급 객실 상태": "수동 예외로 고정된 셀", "계단": "적용 안 함",
+         "이유": "사람이 정한 값을 계단이 덮지 않습니다"},
+    ])
+    c3, c4 = st.columns([3, 4])
+    with c3:
+        st.markdown("**가격 계층과 최소 간격**")
+        st.dataframe(ladder_df, use_container_width=True, hide_index=True)
+    with c4:
+        st.markdown("**발동 기준 (하급 객실 상태 기준)**")
+        st.dataframe(trig_df, use_container_width=True, hide_index=True)
+    st.caption("화면·엑셀에서 계단으로 올라간 셀은 \u21e7 로 표시되고 '근거' 열에 "
+               "'역전방지 계단 N칸'이 들어갑니다.")
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
         step_df.to_excel(w, index=False, sheet_name="연휴·페이스·재고")
         floor_df.to_excel(w, index=False, sheet_name="Floor")
         type_df_r.to_excel(w, index=False, sheet_name="객실타입 조정")
+        ladder_df.to_excel(w, index=False, sheet_name="역전방지 계단")
+        trig_df.to_excel(w, index=False, sheet_name="계단 발동 기준")
     st.download_button("📥 규칙표 엑셀", data=buf.getvalue(),
                        file_name=f"신요금로직_규칙표_{date.today().strftime('%Y%m%d')}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2142,7 +2333,7 @@ def _new_tab_types(day_df, type_df):
 
     st.markdown(_mx_title(f"객실타입별 확정 칸 · {mode} — 행 = 객실 · 열 = 날짜", True),
                 unsafe_allow_html=True)
-    st.markdown(_legend(), unsafe_allow_html=True)
+    st.markdown(_legend("<b>⇧</b> 역전방지 계단으로 상향"), unsafe_allow_html=True)
     head = _mx_head(dates, dmap, "객실")
     rows, xrows = [], []
 
@@ -2179,6 +2370,8 @@ def _new_tab_types(day_df, type_df):
                            'bg': '#EFF1F2', 'fg': '#A8AEB4', 'bold': False})
                 continue
             mark = "✋" if bool(row['is_override']) else ("★" if row['approval'] else "")
+            if int(row.get('ladder_up', 0) or 0):
+                mark += "⇧"
             if mode == "칸 크게":
                 t1, t2, t3 = f"{row['lab']}{mark}", _won(row['member']), ""
                 kls = "c3 big"
@@ -2204,8 +2397,9 @@ def _new_tab_types(day_df, type_df):
                 + "".join(rows) + "</tbody></table></div>", unsafe_allow_html=True)
     st.caption("**색은 칸의 절대 위치입니다** — 비쌀수록 진한 빨강, 쌀수록 연한 초록. "
                "사선 셀은 잔여 0 이하로, 요금 조정이 아니라 판매를 닫아야 합니다. "
-               "굵은 가로선은 메인 호텔동(~HDF) / 특수객실(~PPV) 구분, "
-               "굵은 세로선은 주 구분입니다. 이전 대비 변화는 2번 탭에서 보십시오.")
+               "굵은 세로선은 주 구분입니다. **⇧ 는 역전방지 계단으로 칸이 올라간 셀**입니다 — "
+               "하급 객실보다 싸지지 않게 강제한 것이고, 하급에 팔 재고가 거의 없으면 "
+               "계단을 걸지 않습니다. 이전 대비 변화는 2번 탭에서 보십시오.")
 
     _dl(f"📥 이 표 엑셀 (서식 유지) — {mode}",
         [{'sheet': '타입별 칸', 'title': f"객실타입별 확정 칸 · {mode}",
@@ -2241,7 +2435,7 @@ def _new_tab_types(day_df, type_df):
         "객실명": one['rt'].astype(str).map(NEW_ROOM_NAMES),
         "전체": one['cap'], "잔여": one['avail'],
         "잔여율(%)": _numcol(one['remt'], 100).round(1),
-        "칸": one['lab'], "타입조정": one['tadj'],
+        "칸": one['lab'], "타입조정": one['tadj'], "계단": one['ladder_up'],
         "로드(BAR)": one['load'], "회원 노출가": one['member'],
         "해외 랙": one['rack'], "Flex 하한": one['floor_flex'],
         "NRF 하한": one['floor_nrf'],
@@ -2647,11 +2841,12 @@ def _new_excel(day_df, type_df, day_cmp=None, type_cmp=None):
             t['date'] = t['date'].map(lambda x: x.strftime('%Y-%m-%d'))
             t['객실명'] = t['rt'].map(NEW_ROOM_NAMES)
             t = t[['date', 'dow', 'dta', 'rt', '객실명', 'cap', 'avail', 'remt',
-                   'day_lab', 'tadj', 'lab', 'load', 'member', 'rack', 'floor_flex',
-                   'floor_nrf', 'state', 'approval', 'why']]
+                   'day_lab', 'tadj', 'ladder_up', 'lab', 'load', 'member', 'rack',
+                   'floor_flex', 'floor_nrf', 'state', 'approval', 'why']]
             t.columns = ['일자', '요일', 'D-', '객실', '객실명', '전체', '잔여', '잔여율',
-                         '날짜 칸', '타입 조정', '확정 칸', '로드(BAR)', '회원 노출가',
-                         '해외 랙', 'Flex 하한', 'NRF 하한', '상태', '승인', '근거']
+                         '날짜 칸', '타입 조정', '계단', '확정 칸', '로드(BAR)',
+                         '회원 노출가', '해외 랙', 'Flex 하한', 'NRF 하한',
+                         '상태', '승인', '근거']
             t.to_excel(w, index=False, sheet_name="타입별 칸")
 
             # ※ 매트릭스는 화면과 같은 방향으로 — 행 = 객실, 열 = 날짜
