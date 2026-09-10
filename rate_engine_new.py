@@ -179,6 +179,17 @@ NEW_MULT = {
 }
 # 표시 순서는 기존 앱 ALL_ROOMS 와 동일합니다 (메인 호텔동 → 특수객실).
 NEW_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF", "GDB", "GDF", "FFD", "FPT", "PPV"]
+
+# 객실 묶음 — 화면 필터에서 한 번에 고르기 위한 그룹입니다.
+#   같은 동/상품군은 재고와 요금이 같이 움직이므로 묶어 보는 게 대부분입니다.
+NEW_ROOM_GROUPS = [
+    ("전체", None),
+    ("힐 (호텔동)", ["HDT", "HDP", "HDF"]),
+    ("포레스트", ["FDB", "FDE", "FFD", "FPT"]),
+    ("그린밸리", ["GDB", "GDF"]),
+    ("풀빌라", ["PPV"]),
+    ("직접 선택", []),
+]
 NEW_ROOM_NAMES = {
     "HDT": "힐 엠버 트윈", "HDP": "힐 파인 더블", "HDF": "힐 루나 패밀리",
     "FDB": "포레스트 가든 더블", "FDE": "포레스트 가든 더블 EB",
@@ -1673,7 +1684,8 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label="", day_df=None):
         st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
         mvonly = st.checkbox("바뀐 셀만 강조 (안 바뀐 셀은 흐리게)", value=True,
                              key="new_chg_mxonly")
-        dts, _m, _r = _mx_controls(day_df, "new_chg_mx")
+        dts, _m, chg_rooms = _mx_controls(day_df, "new_chg_mx")
+        chg_order = [r for r in NEW_ROW_ORDER if r in (chg_rooms or NEW_ROW_ORDER)]
         if dts:
             dmap = day_df.drop_duplicates(subset=['date'], keep='first').set_index('date')
             tix = type_cmp.drop_duplicates(subset=['date', 'rt'], keep='first')
@@ -1715,7 +1727,7 @@ def _new_tab_change(day_cmp, type_cmp, summary, compare_label="", day_df=None):
                         + "".join(cells) + "</tr>")
             xrows.append({'label': '날짜 칸 (기준)', 'sub': '현재 · 이전▲▼ · 판매',
                           'group_end': True, 'cells': xcells})
-            for rt in NEW_ROW_ORDER:
+            for rt in chg_order:
                 cls = "gend" if rt in NEW_GROUP_END else ""
                 cells, xcells = [], []
                 for d in dts:
@@ -2071,8 +2083,12 @@ def _legend(extra=None):
     return "<div class='mxlg'>" + "".join(parts) + "</div>"
 
 
-def _mx_controls(day_df, key, cell_modes=None, default_mode=0):
+def _mx_controls(day_df, key, cell_modes=None, default_mode=0,
+                 rooms_filter=True):
     """표 위 컨트롤을 한 줄로 모읍니다 — 기본은 '한 달씩'.
+
+    rooms_filter=False 는 행이 객실이 아닌 표(일자별 단계표)에서 씁니다 —
+    골라도 아무 일이 안 일어나는 컨트롤을 띄우지 않기 위한 것입니다.
 
     반환: (dates, mode, rooms)
     """
@@ -2087,10 +2103,12 @@ def _mx_controls(day_df, key, cell_modes=None, default_mode=0):
     if fut:
         cur_key = f"{fut[0].year}년 {fut[0].month}월"
 
+    dta_of = {d: int(sub.loc[d, 'dta']) for d in all_d}
     c = st.columns([2, 3, 2] if cell_modes else [3, 3])
     with c[0]:
-        span = st.radio("보기 범위", ["한 달씩", "전체 기간"], horizontal=True,
-                        key=f"{key}_span")
+        span = st.selectbox(
+            "보기 범위", ["한 달씩", "앞으로 7일", "앞으로 30일", "앞으로 90일",
+                      "전체 기간", "날짜 직접 지정"], key=f"{key}_span")
     idx = 0
     if span == "한 달씩":
         with c[1]:
@@ -2099,10 +2117,29 @@ def _mx_controls(day_df, key, cell_modes=None, default_mode=0):
             pick = st.radio("월", labels, index=idx, horizontal=True, key=f"{key}_mon")
         keep = {tuple(int(x.rstrip('년월')) for x in pick.split())}
         dates = [d for d in all_d if (d.year, d.month) in keep]
-    else:
+    elif span == "날짜 직접 지정":
+        with c[1]:
+            rng = st.date_input("시작 ~ 종료", value=(all_d[0], all_d[-1]),
+                                min_value=all_d[0], max_value=all_d[-1],
+                                key=f"{key}_rng")
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                a, b = _as_date(rng[0]), _as_date(rng[1])
+            else:
+                a = b = _as_date(rng if not isinstance(rng, (list, tuple)) else rng[0])
+            if a and b and a > b:
+                a, b = b, a
+            dates = [d for d in all_d
+                     if (a is None or d >= a) and (b is None or d <= b)]
+    elif span == "전체 기간":
         dates = list(all_d)
         with c[1]:
             st.caption("전체 기간을 한 표에 펼칩니다. 좌우로 스크롤하세요.")
+    else:
+        n = int(span.replace("앞으로 ", "").replace("일", ""))
+        dates = [d for d in all_d if 0 <= dta_of[d] <= n]
+        with c[1]:
+            st.caption(f"{len(dates)}일 · " + (f"{dates[0]} ~ {dates[-1]}"
+                                              if dates else "해당 날짜 없음"))
 
     mode = None
     if cell_modes:
@@ -2110,15 +2147,31 @@ def _mx_controls(day_df, key, cell_modes=None, default_mode=0):
             mode = st.radio("셀 내용", cell_modes, index=default_mode,
                             key=f"{key}_mode")
 
-    with st.expander("🔧 더 좁히기 — 객실타입 · 과거 날짜", expanded=False):
-        e1, e2 = st.columns([4, 1])
-        with e1:
-            rooms = st.multiselect("객실타입", NEW_ROW_ORDER, default=NEW_ROW_ORDER,
-                                   key=f"{key}_rooms")
-        with e2:
-            past = st.checkbox("과거 포함", value=False, key=f"{key}_past")
+    rooms = list(NEW_ROW_ORDER)
+    if rooms_filter:
+        g1, g2, g3 = st.columns([2, 3, 1])
+        with g1:
+            grp = st.radio("객실타입", [n for n, _ in NEW_ROOM_GROUPS],
+                           horizontal=True, key=f"{key}_grp")
+        gmap = dict(NEW_ROOM_GROUPS)
+        with g2:
+            if grp == "직접 선택":
+                rooms = st.multiselect(
+                    "객실 고르기", NEW_ROW_ORDER, default=NEW_ROW_ORDER,
+                    key=f"{key}_rooms",
+                    format_func=lambda x: f"{x} {NEW_ROOM_NAMES.get(x,'')}")
+            else:
+                rooms = gmap[grp] or list(NEW_ROW_ORDER)
+                st.caption(" · ".join(f"{r} {NEW_ROOM_NAMES.get(r,'')}"
+                                      for r in NEW_ROW_ORDER if r in rooms))
+        with g3:
+            past = st.checkbox("과거 포함", value=(span == "날짜 직접 지정"),
+                               key=f"{key}_past")
+    else:
+        past = st.checkbox("과거 포함", value=(span == "날짜 직접 지정"),
+                           key=f"{key}_past")
     if not past:
-        dates = [d for d in dates if int(sub.loc[d, 'dta']) >= 0]
+        dates = [d for d in dates if dta_of[d] >= 0]
     return dates, mode, (rooms or list(NEW_ROW_ORDER))
 
 
@@ -2162,26 +2215,71 @@ def _new_tab_final(day_df, type_df, ov_raw=None):
     months = sorted({(d.year, d.month) for d in all_d})
     mlabels = [f"{y}년 {m}월" for y, m in months]
 
+    # ── 기간 ──────────────────────────────────────────────────────
+    #   dta = 입실일 - 기준일. 음수면 이미 지난 날짜입니다.
+    dta_of = {d: int(dsub.loc[d, 'dta']) for d in all_d}
     c1, c2, c3 = st.columns([2, 3, 2])
     with c1:
-        span = st.radio("기간", ["전 기간", "월별"], horizontal=True, key="fin_span")
+        span = st.selectbox(
+            "기간", ["전 기간", "앞으로 7일", "앞으로 30일", "앞으로 90일",
+                   "지난 30일", "지난 날짜 전체", "월별", "날짜 직접 지정"],
+            key="fin_span")
     with c2:
         if span == "월별":
             pick = st.multiselect("월", mlabels, default=mlabels, key="fin_mon")
             keep = {tuple(int(x.rstrip('년월')) for x in p.split()) for p in pick}
             dates = [d for d in all_d if (d.year, d.month) in keep]
+        elif span == "날짜 직접 지정":
+            rng = st.date_input("시작 ~ 종료", value=(all_d[0], all_d[-1]),
+                                min_value=all_d[0], max_value=all_d[-1],
+                                key="fin_rng")
+            if isinstance(rng, (list, tuple)) and len(rng) == 2:
+                a, b = _as_date(rng[0]), _as_date(rng[1])
+            else:
+                a = b = _as_date(rng if not isinstance(rng, (list, tuple)) else rng[0])
+            if a and b and a > b:
+                a, b = b, a
+            dates = [d for d in all_d if (a is None or d >= a) and (b is None or d <= b)]
         else:
-            dates = list(all_d)
-            st.caption(f"{len(all_d)}일 전체 · {all_d[0]} ~ {all_d[-1]}")
+            if span == "전 기간":
+                dates = list(all_d)
+            elif span == "지난 날짜 전체":
+                dates = [d for d in all_d if dta_of[d] < 0]
+            elif span == "지난 30일":
+                dates = [d for d in all_d if -30 <= dta_of[d] < 0]
+            else:
+                n = int(span.replace("앞으로 ", "").replace("일", ""))
+                dates = [d for d in all_d if 0 <= dta_of[d] <= n]
+            if dates:
+                st.caption(f"{len(dates)}일 · {dates[0]} ~ {dates[-1]}"
+                           f"  (전체 {len(all_d)}일 중)")
+            else:
+                st.caption("해당 구간에 날짜가 없습니다.")
     with c3:
         fld_nm = st.selectbox("표시 요금", [n for n, _ in _FIN_FIELDS], key="fin_fld")
     field = dict(_FIN_FIELDS)[fld_nm]
-    with st.expander("🔧 객실타입 좁히기", expanded=False):
-        rooms = st.multiselect("객실타입", NEW_ROW_ORDER, default=NEW_ROW_ORDER,
-                               key="fin_rooms")
+
+    # ── 객실타입 ──────────────────────────────────────────────────
+    g1, g2 = st.columns([2, 3])
+    with g1:
+        grp = st.radio("객실타입", [n for n, _ in NEW_ROOM_GROUPS], horizontal=True,
+                       key="fin_grp")
+    gmap = dict(NEW_ROOM_GROUPS)
+    with g2:
+        if grp == "직접 선택":
+            rooms = st.multiselect("객실 고르기", NEW_ROW_ORDER,
+                                   default=NEW_ROW_ORDER, key="fin_rooms",
+                                   format_func=lambda x: f"{x} {NEW_ROOM_NAMES.get(x,'')}")
+        else:
+            rooms = gmap[grp] or list(NEW_ROW_ORDER)
+            st.caption(" · ".join(f"{r} {NEW_ROOM_NAMES.get(r,'')}"
+                                  for r in NEW_ROW_ORDER if r in rooms))
     order = [r for r in NEW_ROW_ORDER if r in (rooms or NEW_ROW_ORDER)]
-    if not dates or not order:
-        st.warning("표시할 날짜 또는 객실이 없습니다.")
+    if not dates:
+        st.warning("표시할 날짜가 없습니다. 기간을 넓혀 주십시오.")
+        return
+    if not order:
+        st.warning("객실을 하나 이상 고르십시오.")
         return
 
     tix = type_df.drop_duplicates(subset=['date', 'rt'], keep='first')
@@ -2765,7 +2863,7 @@ def _new_tab_days(day_df):
         st.info("리포트를 업로드하세요.")
         return
     st.markdown(NEW_MX_CSS, unsafe_allow_html=True)
-    dates, _, _ = _mx_controls(day_df, "new_days")
+    dates, _, _ = _mx_controls(day_df, "new_days", rooms_filter=False)
     if not dates:
         st.warning("표시할 날짜가 없습니다. 위에서 월을 고르거나 '과거 포함'을 켜세요.")
         return
