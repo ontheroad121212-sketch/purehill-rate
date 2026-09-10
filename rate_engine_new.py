@@ -362,6 +362,15 @@ NEW_TYPE_LOOSE_1 = (0.70, 0.40)                # (타입잔여, 총잔여) 이�
 NEW_TYPE_LOOSE_LEAD = 44                       # 하향은 D-44 이내에서만
 NEW_TYPE_LOOSE_EXCLUDE = {"GDB"}               # 그린밸리 더블은 하향 제외
 NEW_TYPE_SCARCE_REMH = 0.20                    # 그날 총잔여 20% 이하면 남은 타입은 희소재
+# 잔여 0 이하(마감·오버부킹)일 때 칸 조정.
+#   [고친 이유] 예전에는 0칸이었습니다 — "못 파는데 요금을 왜 정하나"는 판단이었는데
+#   틀렸습니다. 마감·오버부킹된 재고는 취소가 나면 그 요금으로 다시 열립니다.
+#   오버부킹은 실제로 워크·취소로 풀리는 일이 잦으므로, 가장 희소한 재고를
+#   사다리 최저가로 되열어 주는 셈이 됩니다.
+#   또 신호가 거꾸로 뒤집혔습니다 — 1실 남으면 2칸 상향인데 -1실이면 0칸.
+#   그래서 잔여 0 이하는 '잔여율 0' = 최대 희소로 보고 TIGHT 규칙을 그대로 적용합니다.
+#   (판매 마감 표시는 그대로입니다. 요금만 제 위치로 올려둡니다.)
+NEW_TYPE_SOLDOUT_TIGHT = True
 NEW_TYPE_RUNG_MIN = 1                          # 상향 한계
 NEW_TYPE_RUNG_MAX = 13                         # 하향 한계 (B10). B11~B13은 승인 항목
 NEW_APPROVAL_RUNG = 4
@@ -1068,7 +1077,13 @@ def new_compute_types(curr_df, day_df, today=None, overrides=None):
             state, why = "데이터 이상", "잔여/전체 결측 — 날짜 칸을 그대로 씁니다"
         elif av <= 0:
             state = "마감" if av == 0 else "오버부킹"
-            why = "팔 재고 없음 — 요금은 참고값"
+            if NEW_TYPE_SOLDOUT_TIGHT:
+                # 잔여율 0 = 최대 희소. 살아 있는 타입과 같은 규칙을 씁니다.
+                tadj = min(s for _thr, s in NEW_TYPE_TIGHT)
+                why = ("팔 재고 없음 — 최대 희소로 %d칸 상향 "
+                       "(취소로 다시 열릴 때의 요금)" % -tadj)
+            else:
+                why = "팔 재고 없음 — 요금은 참고값"
         else:
             hit = False
             for thr, s in NEW_TYPE_TIGHT:
@@ -2436,8 +2451,15 @@ def _new_tab_final(day_df, type_df, ov_raw=None):
              f"({_pct(_num(tr['remt']))}) → {'▲' if ta < 0 else '▼'}{abs(ta)}칸"
              if ta else f"잔여 {_won(tr['avail'])}/{tr['cap']}실 — 조정 없음"))
         lu = int(tr.get('ladder_up', 0) or 0)
-        add("8", "역전방지 계단", new_lab(int(tr['rung'])) if lu else "—",
-            f"하급 객실 서열 보장 → ▲{lu}칸" if lu else "발동 안 함")
+        add("8", "역전방지 계단 · 대체 상한",
+            new_lab(int(tr['rung'])) if lu else "—",
+            (f"하급 객실 서열 보장 → ▲{lu}칸" if lu > 0 else
+             (f"차액이 현장 추가 비용을 넘어 → ▼{-lu}칸" if lu < 0 else "발동 안 함")))
+        fl = NEW_PRICE_FLOOR.get(qr)
+        if fl:
+            add("9", "요금 하한", f"{fl:,}원",
+                ("구속 중 — 이 칸에서는 칸을 더 내려도 요금이 그대로입니다"
+                 if new_floor_hit(qr, int(tr['rung'])) else "여유 있음 (하한 위)"))
         if bool(tr['is_override']):
             add("✋", "수동 예외", tr['lab'], "사람이 고정한 칸 (자동 계산을 덮음)")
         st.dataframe(pd.DataFrame(steps), use_container_width=True, hide_index=True)
